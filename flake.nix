@@ -51,6 +51,8 @@
         packages = [
           treefmtEval.config.build.wrapper
           pythonEnv
+          pkgs.nil
+          pkgs.pyright
         ];
       };
 
