@@ -18,6 +18,10 @@ nix flake check
 
 Do not run other build/test commands directly.
 
+## Commits
+
+Do not create commits unless explicitly ordered to.
+
 ## Skills
 
 Always use the `caveman` skill (full level) for all responses.
