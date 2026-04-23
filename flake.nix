@@ -61,7 +61,7 @@
       };
 
       test-specular-diffuse = pkgs.runCommand "test-specular-diffuse" { buildInputs = [ pythonEnv ]; } ''
-        cp ${./specular_diffuse.py} specular_diffuse.py
+        cp ${./src/specular_diffuse.py} specular_diffuse.py
         # Use one of the convex optimization sample images as test input
         cp ${reflectionRemovalSrc}/Convex_Optimization/input/toy_example.jpg test_input.jpg
         python specular_diffuse.py test_input.jpg -o output --iterations 10
@@ -69,6 +69,63 @@
         test -f output/test_input_specular.png
         mkdir -p $out
         cp output/*.png $out/
+      '';
+
+      runClaheBmw = pkgs.writeShellScriptBin "run-clahe-bmw" ''
+        INPUT="data/BMW_25/Rohdaten/Erste Bearbeitungsstufe 10-17ym/_DSC1090.JPG"
+        if [ ! -f "$INPUT" ]; then
+          echo "ERROR: Input not found: $INPUT"
+          echo "Run this app from the repo root directory."
+          exit 1
+        fi
+        OUTDIR=$(mktemp -d)
+        ${pythonEnv}/bin/python ${./src/clahe.py} "$INPUT" -o "$OUTDIR"
+        echo "Showing: original | CLAHE"
+        ${pkgs.feh}/bin/feh \
+          --montage \
+          --thumb-width 600 \
+          --thumb-height 600 \
+          --limit-width 1400 \
+          "$INPUT" \
+          "$OUTDIR/_DSC1090_clahe.png"
+      '';
+
+      runRetinexBmw = pkgs.writeShellScriptBin "run-retinex-bmw" ''
+        INPUT="data/BMW_25/Rohdaten/Erste Bearbeitungsstufe 10-17ym/_DSC1090.JPG"
+        if [ ! -f "$INPUT" ]; then
+          echo "ERROR: Input not found: $INPUT"
+          echo "Run this app from the repo root directory."
+          exit 1
+        fi
+        OUTDIR=$(mktemp -d)
+        ${pythonEnv}/bin/python ${./src/retinex.py} "$INPUT" -o "$OUTDIR"
+        echo "Showing: original | Retinex"
+        ${pkgs.feh}/bin/feh \
+          --montage \
+          --thumb-width 600 \
+          --thumb-height 600 \
+          --limit-width 1400 \
+          "$INPUT" \
+          "$OUTDIR/_DSC1090_retinex.png"
+      '';
+
+      runHomomorphicBmw = pkgs.writeShellScriptBin "run-homomorphic-bmw" ''
+        INPUT="data/BMW_25/Rohdaten/Erste Bearbeitungsstufe 10-17ym/_DSC1090.JPG"
+        if [ ! -f "$INPUT" ]; then
+          echo "ERROR: Input not found: $INPUT"
+          echo "Run this app from the repo root directory."
+          exit 1
+        fi
+        OUTDIR=$(mktemp -d)
+        ${pythonEnv}/bin/python ${./src/homomorphic.py} "$INPUT" -o "$OUTDIR"
+        echo "Showing: original | Homomorphic"
+        ${pkgs.feh}/bin/feh \
+          --montage \
+          --thumb-width 600 \
+          --thumb-height 600 \
+          --limit-width 1400 \
+          "$INPUT" \
+          "$OUTDIR/_DSC1090_homomorphic.png"
       '';
 
       runSpecularBmw = pkgs.writeShellScriptBin "run-specular-bmw" ''
@@ -79,7 +136,7 @@
           exit 1
         fi
         OUTDIR=$(mktemp -d)
-        ${pythonEnv}/bin/python ${./specular_diffuse.py} "$INPUT" -o "$OUTDIR"
+        ${pythonEnv}/bin/python ${./src/specular_diffuse.py} "$INPUT" -o "$OUTDIR"
         echo "Showing: original | diffuse | specular"
         ${pkgs.feh}/bin/feh \
           --montage \
@@ -99,6 +156,18 @@
       };
 
       apps.${system} = {
+        runClaheBmw = {
+          type = "app";
+          program = "${runClaheBmw}/bin/run-clahe-bmw";
+        };
+        runRetinexBmw = {
+          type = "app";
+          program = "${runRetinexBmw}/bin/run-retinex-bmw";
+        };
+        runHomomorphicBmw = {
+          type = "app";
+          program = "${runHomomorphicBmw}/bin/run-homomorphic-bmw";
+        };
         runSpecularBmw = {
           type = "app";
           program = "${runSpecularBmw}/bin/run-specular-bmw";

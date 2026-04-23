@@ -13,25 +13,60 @@ Reflections from workshop lighting create bright spots and specular highlights t
 
 ## Goal
 
-Evaluate and implement reflection removal techniques as a preprocessing step to improve grinding state classification. Starting point is [Reflection-Removal-Techniques-Review](https://github.com/Devashi-Choudhary/Reflection-Removal-Techniques-Review).
+Evaluate and implement reflection removal / brightness normalization techniques as a preprocessing step to improve grinding state classification.
 
-## Approach
+## Implemented Methods
 
-1. Implement/adapt reflection removal methods from the reference repo
-2. Test on our metal surface dataset (to be added)
-3. Measure impact on classification accuracy with and without reflection removal
-4. Select best method for integration into the classification pipeline
+All scripts live in `src/` and can be run standalone or via Nix apps on the BMW test image.
 
-## Immediate Goals
+### CLAHE — `src/clahe.py`
 
-1. **Specular/diffuse separation** — Implement chromaticity-based separation (Tan & Ikeuchi 2005, Yang et al. 2010). Separates specular highlights from diffuse component. Well-suited for metal since specular highlights shift toward light source color.
+Contrast Limited Adaptive Histogram Equalization. Divides image into tiles, equalizes histogram per tile with contrast limiting. Applied to L channel in LAB space.
+
+```
+nix run .#runClaheBmw
+python src/clahe.py <image> --clip-limit 2.0 --tile-size 8
+```
+
+### Multi-Scale Retinex — `src/retinex.py`
+
+Decomposes image into illumination × reflectance in log domain. Subtracts Gaussian-blurred illumination at multiple scales to normalize local brightness.
+
+- Ref: Jobson et al. (1997) "A Multiscale Retinex for Bridging the Gap Between Color Images and the Human Observation of Scenes." IEEE TIP 6(7).
+
+```
+nix run .#runRetinexBmw
+python src/retinex.py <image> --sigmas 15 80 250
+```
+
+### Homomorphic Filtering — `src/homomorphic.py`
+
+High-pass filter in log-frequency domain. Attenuates slowly-varying illumination, preserves surface texture.
+
+- Ref: Gonzalez & Woods (2008) "Digital Image Processing" Ch. 4.9.
+
+```
+nix run .#runHomomorphicBmw
+python src/homomorphic.py <image> --gamma-low 0.3 --gamma-high 1.5 --cutoff 30
+```
+
+### Specular/Diffuse Separation — `src/specular_diffuse.py`
+
+Chromaticity-based separation using the dichromatic reflection model. Best when material and illuminant colors differ.
+
+- Ref: Tan & Ikeuchi (2005) "Separating Reflection Components of Textured Surfaces using a Single Image." IEEE TPAMI 27(2).
+
+```
+nix run .#runSpecularBmw
+python src/specular_diffuse.py <image> --iterations 1 --kernel-size 15
+```
 
 ## Future Options
 
-- **Highlight inpainting** — Detect saturated/near-saturated pixels, mask them, inpaint from surrounding texture. Simple and effective when highlights are small relative to surface area.
-- **Deep Learning (GANs)** — GCNet-based reflection removal from [reference repo](https://github.com/Devashi-Choudhary/Reflection-Removal-Techniques-Review). Single-image, needs pretrained weights.
-- **Convex Optimization** — Reflection suppression via gradient thresholding + DCT (Yang et al. CVPR 2019). [MATLAB reference](https://github.com/alexch1/ImageProcessing).
-- **Relative Smoothness** — Single image layer separation. [MATLAB reference](https://github.com/yyhz76/reflectSuppress).
+- **Highlight inpainting** — Mask saturated pixels, inpaint from surrounding texture.
+- **Deep Learning (GANs)** — GCNet-based removal from [reference repo](https://github.com/Devashi-Choudhary/Reflection-Removal-Techniques-Review). Needs pretrained weights.
+- **Convex Optimization** — Gradient thresholding + DCT (Yang et al. CVPR 2019). [MATLAB ref](https://github.com/alexch1/ImageProcessing).
+- **Relative Smoothness** — Single image layer separation. [MATLAB ref](https://github.com/yyhz76/reflectSuppress).
 
 ## Dataset
 

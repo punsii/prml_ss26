@@ -1,12 +1,19 @@
-result
-.envrc.secret
-data
-.pi/settings.json
-.pi/agent/auth.json
+# Nix
 .direnv/
+result
+
+# Python
 __pycache__/
-*.pyc
 *.egg-info/
-dist/
+*.pyc
 build/
+dist/
 .eggs/
+
+# Project data (symlinked, not tracked)
+data
+
+# Secrets & local config
+.envrc.secret
+.pi/agent/auth.json
+.pi/settings.json
