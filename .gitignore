@@ -1,4 +1,6 @@
 result
+.envrc.secret
+data
 .pi/settings.json
 .pi/agent/auth.json
 .direnv/
