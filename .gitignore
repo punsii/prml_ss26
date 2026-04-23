@@ -1,0 +1,10 @@
+result
+.pi/settings.json
+.pi/agent/auth.json
+.direnv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.eggs/
