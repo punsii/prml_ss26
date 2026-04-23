@@ -38,15 +38,28 @@
         ps:
         with ps;
         [
-          matplotlib
+          # core
           numpy
           pillow
+          tqdm
+
+          # opencv
+          opencv4
+
+          # deep learning
           torch
           torchvision
+
+          # utilities
+          matplotlib
         ]
       );
     in
     {
+      checks.${system} = {
+        devShell = self.devShells.${system}.default;
+      };
+
       devShells.${system}.default = pkgs.mkShell {
         packages = [
           treefmtEval.config.build.wrapper
