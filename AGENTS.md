@@ -13,3 +13,7 @@ nix flake check
 ```
 
 Do not run other build/test commands directly.
+
+## Skills
+
+Always use the `caveman` skill (full level) for all responses.
