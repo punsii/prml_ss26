@@ -60,72 +60,48 @@
         hash = "sha256-/EZDDZjHCRNiIdSRC5D8YDTWsVe92HHnUDIR9AqpLFE=";
       };
 
-      test-averaging = pkgs.runCommand "test-averaging" { buildInputs = [ pythonEnv ]; } ''
-        cp -r ${reflectionRemovalSrc}/Averaging/* .
-        chmod -R u+w .
-        # Patch out cv2.imshow/waitKey (no display in sandbox)
-        sed -i 's/cv2.imshow.*/#/' Averaging.py
-        sed -i 's/cv2.waitKey.*/#/' Averaging.py
-        python Averaging.py -i 5_images_lowers
-        test -f Average.png
+      test-specular-diffuse = pkgs.runCommand "test-specular-diffuse" { buildInputs = [ pythonEnv ]; } ''
+        cp ${./specular_diffuse.py} specular_diffuse.py
+        # Use one of the convex optimization sample images as test input
+        cp ${reflectionRemovalSrc}/Convex_Optimization/input/toy_example.jpg test_input.jpg
+        python specular_diffuse.py test_input.jpg -o output --iterations 10
+        test -f output/test_input_diffuse.png
+        test -f output/test_input_specular.png
         mkdir -p $out
-        cp Average.png $out/
+        cp output/*.png $out/
       '';
 
-      test-ica = pkgs.runCommand "test-ica" { buildInputs = [ pythonEnv ]; } ''
-        cp -r ${reflectionRemovalSrc}/ICA/* .
-        chmod -R u+w .
-        python ICA.py -i1 1.png -i2 2.png
-        test -f try-A1.png
-        test -f try-B2.png
-        mkdir -p $out
-        cp try-A1.png try-B2.png $out/
-      '';
-
-      showAveraging = pkgs.writeShellScriptBin "show-averaging" ''
-        echo "Averaging: before (5 input images) → after"
-        echo "Inputs: ${reflectionRemovalSrc}/Averaging/5_images_lowers/"
-        echo "Output: ${test-averaging}/Average.png"
+      runSpecularBmw = pkgs.writeShellScriptBin "run-specular-bmw" ''
+        INPUT="data/BMW_25/Rohdaten/Erste Bearbeitungsstufe 10-17ym/_DSC1090.JPG"
+        if [ ! -f "$INPUT" ]; then
+          echo "ERROR: Input not found: $INPUT"
+          echo "Run this app from the repo root directory."
+          exit 1
+        fi
+        OUTDIR=$(mktemp -d)
+        ${pythonEnv}/bin/python ${./specular_diffuse.py} "$INPUT" -o "$OUTDIR"
+        echo "Showing: original | diffuse | specular"
         ${pkgs.feh}/bin/feh \
           --montage \
-          --thumb-width 400 \
-          --thumb-height 300 \
-          --limit-width 2000 \
-          ${reflectionRemovalSrc}/Averaging/5_images_lowers/* \
-          ${test-averaging}/Average.png
-      '';
-
-      showIca = pkgs.writeShellScriptBin "show-ica" ''
-        echo "ICA: 2 input images → 2 separated layers"
-        echo "Inputs: ${reflectionRemovalSrc}/ICA/1.png, ${reflectionRemovalSrc}/ICA/2.png"
-        echo "Outputs: ${test-ica}/try-A1.png, ${test-ica}/try-B2.png"
-        ${pkgs.feh}/bin/feh \
-          --montage \
-          --thumb-width 400 \
-          --thumb-height 400 \
+          --thumb-width 500 \
+          --thumb-height 500 \
           --limit-width 1600 \
-          ${reflectionRemovalSrc}/ICA/1.png \
-          ${reflectionRemovalSrc}/ICA/2.png \
-          ${test-ica}/try-A1.png \
-          ${test-ica}/try-B2.png
+          "$INPUT" \
+          "$OUTDIR/_DSC1090_diffuse.png" \
+          "$OUTDIR/_DSC1090_specular.png"
       '';
+
     in
     {
       checks.${system} = {
         devShell = self.devShells.${system}.default;
-        inherit test-averaging test-ica;
-        show-averaging = showAveraging;
-        show-ica = showIca;
+        inherit test-specular-diffuse;
       };
 
       apps.${system} = {
-        showAveraging = {
+        runSpecularBmw = {
           type = "app";
-          program = "${showAveraging}/bin/show-averaging";
-        };
-        showIca = {
-          type = "app";
-          program = "${showIca}/bin/show-ica";
+          program = "${runSpecularBmw}/bin/run-specular-bmw";
         };
       };
 
