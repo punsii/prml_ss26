@@ -46,6 +46,32 @@ def load_labels(csv_path: Path) -> list[tuple[str, str]]:
     return rows
 
 
+def load_labels_from_dirs(root_dir: Path) -> list[tuple[str, str]]:
+    """Derive class labels from subfolder names under root_dir.
+
+    Each immediate subdirectory of root_dir is treated as a class.
+    Returns list of (relative_path, label) where relative_path is
+    "<subfolder_name>/<filename>" — joinable with root_dir to get the
+    full image path.
+
+    Supported extensions: .jpg, .jpeg, .png, .bmp (case-insensitive).
+    """
+
+    def _safe(s: str) -> str:
+        return s.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
+
+    rows: list[tuple[str, str]] = []
+    exts = {".jpg", ".jpeg", ".png", ".bmp"}
+    for subdir in sorted(root_dir.iterdir()):
+        if not subdir.is_dir():
+            continue
+        label = _safe(subdir.name)
+        for img_file in sorted(subdir.iterdir()):
+            if img_file.suffix.lower() in exts:
+                rows.append((f"{subdir.name}/{img_file.name}", label))
+    return rows
+
+
 def compute_full_image_vectors(
     rows: list[tuple[str, str]],
     data_dir: Path,
@@ -134,14 +160,14 @@ def mahalanobis_filter(
             dropped_per_class[cls] = []
             continue
 
-        lw = LedoitWolf()
+        lw = LedoitWolf(store_precision=True)
         lw.fit(cls_vecs)
         mu = lw.location_
-        cov_inv = np.linalg.inv(lw.covariance_)
+        prec = lw.precision_
 
         diffs = cls_vecs - mu
-        # vectorised Mahalanobis
-        d = np.sqrt(np.einsum("ij,jk,ik->i", diffs, cov_inv, diffs))
+        # vectorised Mahalanobis using precomputed precision matrix
+        d = np.sqrt(np.einsum("ij,jk,ik->i", diffs, prec, diffs))
         distances[cls_idx] = d
 
         n_drop = int(np.floor(len(cls_idx) * drop_percentage))

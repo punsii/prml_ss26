@@ -24,11 +24,11 @@ from sklearn.preprocessing import StandardScaler
 
 from clahe import apply_clahe
 from class_stats import (CLASS_COLORS, compute_class_stats,
-                         compute_full_image_vectors, load_labels, logreg_cv,
-                         mahalanobis_filter)
+                         compute_full_image_vectors, load_labels,
+                         load_labels_from_dirs, logreg_cv, mahalanobis_filter)
 from homomorphic import homomorphic_filter
-from radial import (GRID_SIZE, RADIAL_DC_TRIM, TILE_INDICES, extract_patches,
-                    radial_profile)
+from radial import (GRID_SIZE, RADIAL_DC_TRIM, TILE_INDICES, _radial_from_mag,
+                    center_crop, extract_patches, radial_profile)
 from retinex import multi_scale_retinex
 
 IMAGE_DIR = Path("data/BMW_25/Rohdaten/Erste Bearbeitungsstufe 10-17ym")
@@ -166,6 +166,26 @@ def render_homomorphic_detail(image: np.ndarray) -> None:
 
 LABOR_DIR = Path("data/Datensatz_Labor")
 LABOR_CSV = Path("data/Labels_Datensatz_Labr.csv")
+BMW_DIR = Path("data/BMW_25/Rohdaten")
+
+DATASETS = {
+    "Datensatz Labor": {
+        "type": "csv",
+        "image_dir": LABOR_DIR,
+        "csv_path": LABOR_CSV,
+    },
+    "BMW 25": {
+        "type": "dirs",
+        "image_dir": BMW_DIR,
+    },
+}
+
+BMW_CLASS_COLORS = {
+    "Fr+\ufffdszustand 17-25ym": "red",
+    "Erste Bearbeitungsstufe 10-17ym": "orange",
+    "Zweite Bearbeitungsstufe 3-10ym": "green",
+    "Finaler Zustand kleiner 3ym": "blue",
+}
 
 METHOD_FNS = {
     "raw": None,
@@ -176,30 +196,138 @@ METHOD_FNS = {
 
 
 @st.cache_data(show_spinner="Computing spectra…")
-def _cached_vectors(method: str, center_percentage: float) -> dict | None:
-    """Cache-keyed on (method, center_percentage). Returns raw vector data."""
-    if not LABOR_DIR.exists() or not LABOR_CSV.exists():
+def _cached_vectors(
+    dataset_name: str, method: str, center_percentage: float
+) -> dict | None:
+    """Cache-keyed on (dataset_name, method, center_percentage). Returns raw vector data."""
+    cfg = DATASETS[dataset_name]
+    image_dir = cfg["image_dir"]
+    if not image_dir.exists():
         return None
-    rows = load_labels(LABOR_CSV)
+
+    if cfg["type"] == "csv":
+        csv_path = cfg["csv_path"]
+        if not csv_path.exists():
+            return None
+        rows = load_labels(csv_path)
+    else:
+        rows = load_labels_from_dirs(image_dir)
+
     fn = METHOD_FNS.get(method)
     vectors, labels, filenames = compute_full_image_vectors(
-        rows, LABOR_DIR, fn, center_percentage
+        rows, image_dir, fn, center_percentage
     )
     if len(vectors) == 0:
         return None
     return {"vectors": vectors, "labels": labels, "filenames": filenames}
 
 
+def _render_fft_explorer(
+    dataset_name: str, method: str, center_percentage: float
+) -> None:
+    """Show 2D FFT magnitude + radial profile for a single selected image."""
+    cfg = DATASETS[dataset_name]
+    image_dir = cfg["image_dir"]
+    if not image_dir.exists():
+        st.warning("Dataset directory not found.")
+        return
+
+    if cfg["type"] == "csv":
+        rows = load_labels(cfg["csv_path"]) if cfg["csv_path"].exists() else []
+        img_paths = [
+            image_dir / fname for fname, _ in rows if (image_dir / fname).exists()
+        ]
+    else:
+        exts = {".jpg", ".jpeg", ".png", ".bmp"}
+        img_paths = sorted(
+            p
+            for subdir in sorted(image_dir.iterdir())
+            if subdir.is_dir()
+            for p in sorted(subdir.iterdir())
+            if p.suffix.lower() in exts
+        )
+
+    if not img_paths:
+        st.warning("No images found for FFT explorer.")
+        return
+
+    def _safe(s: str) -> str:
+        """Re-encode surrogate-escaped bytes (from broken locale) as UTF-8."""
+        return s.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
+
+    if cfg["type"] == "dirs":
+        labels_display = [_safe(f"[{p.parent.name}] {p.name}") for p in img_paths]
+    else:
+        labels_display = [_safe(str(p.relative_to(image_dir))) for p in img_paths]
+    sel_idx = st.selectbox(
+        "Image",
+        range(len(labels_display)),
+        format_func=lambda i: labels_display[i],
+    )
+    selected_path = img_paths[sel_idx]
+
+    raw_img = cv2.imread(str(selected_path), cv2.IMREAD_GRAYSCALE)
+    if raw_img is None:
+        st.error(f"Cannot read: {selected_path}")
+        return
+
+    fn = METHOD_FNS.get(method)
+    img = fn(raw_img) if fn is not None else raw_img
+
+    cropped = center_crop(img, center_percentage)
+    h, w = cropped.shape
+    win = np.outer(np.hanning(h), np.hanning(w))
+    mag = np.abs(np.fft.fftshift(np.fft.fft2(cropped.astype(np.float32) * win)))
+
+    col_orig, col_a, col_b = st.columns(3)
+    with col_orig:
+        st.image(raw_img, caption="Original", use_container_width=True)
+    with col_a:
+        fig_2d = go.Figure(
+            go.Heatmap(z=mag.tolist(), colorscale="Viridis", showscale=False)
+        )
+        fig_2d.update_layout(
+            title="2D FFT magnitude",
+            xaxis=dict(showticklabels=False),
+            yaxis=dict(showticklabels=False, scaleanchor="x"),
+            height=350,
+            margin=dict(l=0, r=0, t=30, b=0),
+        )
+        st.plotly_chart(fig_2d, use_container_width=True)
+    with col_b:
+        profile = _radial_from_mag(mag)
+        x_bins = list(range(len(profile)))
+        fig_rad = go.Figure(
+            go.Scatter(x=x_bins, y=profile.tolist(), mode="lines", name="magnitude")
+        )
+        fig_rad.update_yaxes(type="log")
+        fig_rad.update_layout(
+            title="Radial profile (log y)",
+            xaxis_title="Radial bin",
+            yaxis_title="Magnitude",
+            height=350,
+            margin=dict(l=0, r=0, t=30, b=0),
+        )
+        st.plotly_chart(fig_rad, use_container_width=True)
+
+
 def render_class_spectra_tab() -> None:
-    st.header("Class spectra (Datensatz_Labor)")
+    st.header("Class spectra")
 
-    if not LABOR_DIR.exists():
-        st.warning(f"Data dir not found: `{LABOR_DIR}`. Run from repo root.")
+    # --- Dataset selector ---
+    dataset_name = st.selectbox("Dataset", list(DATASETS.keys()), index=0)
+    cfg = DATASETS[dataset_name]
+    image_dir: Path = cfg["image_dir"]
+    colors = CLASS_COLORS if dataset_name == "Datensatz Labor" else BMW_CLASS_COLORS
+
+    if not image_dir.exists():
+        st.warning(f"Dataset directory not found: `{image_dir}`. Run from repo root.")
         return
-    if not LABOR_CSV.exists():
-        st.warning(f"Labels CSV not found: `{LABOR_CSV}`.")
+    if cfg["type"] == "csv" and not cfg["csv_path"].exists():
+        st.warning(f"Labels CSV not found: `{cfg['csv_path']}`.")
         return
 
+    # --- Method + spectrum controls ---
     method = st.selectbox(
         "Method",
         list(METHOD_FNS.keys()),
@@ -212,15 +340,42 @@ def render_class_spectra_tab() -> None:
         1.0,
         0.5,
         0.05,
-        help="Fraction of image center used for radial spectrum (width and height).",
+        help="Fraction of image center (width and height) used for radial spectrum.",
     )
+
+    # --- 2D FFT explorer ---
+    with st.expander("2D power spectrum explorer", expanded=False):
+        _render_fft_explorer(dataset_name, method, center_percentage)
+
+    # --- Frequency band sliders ---
+    st.markdown("**Frequency band for analysis**")
+    freq_col1, freq_col2 = st.columns(2)
+    with freq_col1:
+        freq_min = st.number_input(
+            "Freq min bin",
+            min_value=0,
+            max_value=500,
+            value=RADIAL_DC_TRIM,
+            step=1,
+            help="Lowest radial bin included. Use the FFT explorer to identify the grinding line band.",
+        )
+    with freq_col2:
+        freq_max = st.number_input(
+            "Freq max bin",
+            min_value=1,
+            max_value=2000,
+            value=200,
+            step=1,
+            help="Highest radial bin included (exclusive). Large value = include all.",
+        )
+
     drop_percentage = st.slider(
         "Drop percentage",
-        0.1,
+        0.0,
         1.0,
         0.1,
         0.01,
-        help="Fraction of each class to drop as outliers (Mahalanobis distance).",
+        help="Fraction of each class to drop as Mahalanobis outliers.",
     )
 
     if not st.button("Compute"):
@@ -228,8 +383,8 @@ def render_class_spectra_tab() -> None:
         return
 
     progress = st.progress(0, text="Loading images…")
-    cached = _cached_vectors(method, center_percentage)
-    progress.progress(50, text="Filtering outliers…")
+    cached = _cached_vectors(dataset_name, method, center_percentage)
+    progress.progress(40, text="Filtering outliers…")
 
     if cached is None:
         st.error("No images found or data unavailable.")
@@ -240,30 +395,42 @@ def render_class_spectra_tab() -> None:
     labels = cached["labels"]
     filenames = cached["filenames"]
 
+    # Band-limit
+    actual_max = vectors.shape[1]
+    fmin = int(freq_min)
+    fmax = min(int(freq_max), actual_max)
+    if fmin >= fmax:
+        st.error(
+            f"freq_min ({fmin}) must be less than freq_max ({fmax}). Vector length: {actual_max}."
+        )
+        progress.empty()
+        return
+
+    vectors_b = vectors[:, fmin:fmax]
+    bin_axis = list(range(fmin, fmax))
+
     kept_mask, distances, dropped_per_class = mahalanobis_filter(
-        vectors, labels, drop_percentage
+        vectors_b, labels, drop_percentage
     )
 
-    vectors_f = vectors[kept_mask]
+    vectors_f = vectors_b[kept_mask]
     labels_f = labels[kept_mask]
-    progress.progress(75, text="Computing statistics…")
+    progress.progress(70, text="Computing statistics…")
 
     class_names = sorted(np.unique(labels).tolist())
-    class_stats = compute_class_stats(vectors_f, labels_f)
-    bin_axis = np.arange(RADIAL_DC_TRIM, vectors_f.shape[1])
+    class_stats_data = compute_class_stats(vectors_f, labels_f)
 
-    # --- Plot 1: Per-class radial spectra (Plotly line chart, log y) ---
+    # --- Plot 1: Per-class radial spectra ---
     fig_spec = go.Figure()
     for cls in class_names:
-        color = CLASS_COLORS.get(cls, "gray")
-        if cls not in class_stats:
+        color = colors.get(cls, "gray")
+        if cls not in class_stats_data:
             continue
-        m = class_stats[cls]["mean"][RADIAL_DC_TRIM:]
-        s = class_stats[cls]["std"][RADIAL_DC_TRIM:]
-        x = bin_axis.tolist()
+        m = class_stats_data[cls]["mean"]
+        s = class_stats_data[cls]["std"]
         fig_spec.add_trace(
             go.Scatter(
-                x=x,
+                x=bin_axis,
                 y=m.tolist(),
                 mode="lines",
                 name=cls,
@@ -272,7 +439,7 @@ def render_class_spectra_tab() -> None:
         )
         fig_spec.add_trace(
             go.Scatter(
-                x=x + x[::-1],
+                x=bin_axis + bin_axis[::-1],
                 y=np.maximum(m + s, 1e-6).tolist() + np.maximum(m - s, 1e-6).tolist(),
                 fill="toself",
                 fillcolor=color,
@@ -284,63 +451,68 @@ def render_class_spectra_tab() -> None:
         )
     fig_spec.update_yaxes(type="log")
     fig_spec.update_layout(
-        title=f"Per-class radial spectra — {method}",
+        title=f"Per-class radial spectra — {dataset_name} — {method}  [bins {fmin}:{fmax}]",
         xaxis_title="Radial bin",
         yaxis_title="Mean FFT magnitude (log)",
         height=400,
     )
     st.plotly_chart(fig_spec, use_container_width=True)
 
-    # --- Plot 2: PCA 3D scatter (Plotly, interactive) ---
-    scaler = StandardScaler()
-    Xs = scaler.fit_transform(vectors_f)
-    pca = PCA(n_components=3)
-    Xp = pca.fit_transform(Xs)
-    evr = pca.explained_variance_ratio_
+    # --- Plot 2: PCA 3D scatter ---
+    if vectors_f.shape[0] >= 3 and vectors_f.shape[1] >= 3:
+        scaler = StandardScaler()
+        Xs = scaler.fit_transform(vectors_f)
+        pca = PCA(n_components=3)
+        Xp = pca.fit_transform(Xs)
+        evr = pca.explained_variance_ratio_
 
-    fig_pca = go.Figure()
-    for cls in class_names:
-        mask = labels_f == cls
-        if not mask.any():
-            continue
-        color = CLASS_COLORS.get(cls, "gray")
-        fig_pca.add_trace(
-            go.Scatter3d(
-                x=Xp[mask, 0].tolist(),
-                y=Xp[mask, 1].tolist(),
-                z=Xp[mask, 2].tolist(),
-                mode="markers",
-                name=cls,
-                marker=dict(size=3, color=color, opacity=0.6),
+        fig_pca = go.Figure()
+        for cls in class_names:
+            mask = labels_f == cls
+            if not mask.any():
+                continue
+            color = colors.get(cls, "gray")
+            fig_pca.add_trace(
+                go.Scatter3d(
+                    x=Xp[mask, 0].tolist(),
+                    y=Xp[mask, 1].tolist(),
+                    z=Xp[mask, 2].tolist(),
+                    mode="markers",
+                    name=cls,
+                    marker=dict(size=3, color=color, opacity=0.6),
+                )
             )
+        fig_pca.update_layout(
+            title=f"PCA 3D — {dataset_name} — {method}  (expl. var: {sum(evr):.1%})",
+            scene=dict(
+                xaxis_title=f"PC1 ({evr[0]:.1%})",
+                yaxis_title=f"PC2 ({evr[1]:.1%})",
+                zaxis_title=f"PC3 ({evr[2]:.1%})",
+            ),
+            height=600,
         )
-    fig_pca.update_layout(
-        title=f"PCA 3D — {method}  (expl. var: {sum(evr):.1%})",
-        scene=dict(
-            xaxis_title=f"PC1 ({evr[0]:.1%})",
-            yaxis_title=f"PC2 ({evr[1]:.1%})",
-            zaxis_title=f"PC3 ({evr[2]:.1%})",
-        ),
-        height=600,
-    )
-    st.plotly_chart(fig_pca, use_container_width=True)
+        st.plotly_chart(fig_pca, use_container_width=True)
+    else:
+        st.info("Not enough samples/dimensions for PCA 3D after filtering.")
 
-    # --- Logreg on filtered data ---
-    acc, std = logreg_cv(vectors_f, labels_f)
+    # --- Logreg ---
+    acc, std_acc = logreg_cv(vectors_f, labels_f)
     st.subheader("Logistic regression CV accuracy (filtered)")
     st.caption(
-        "Multinomial logistic regression on filtered radial profile vectors. "
-        "5-fold stratified CV. Random baseline = 1/4 = 0.25."
+        "Multinomial logistic regression on band-limited filtered radial profile vectors. "
+        "5-fold stratified CV."
     )
     df_lr = pd.DataFrame(
         [
             {
+                "Dataset": dataset_name,
                 "Method": method,
-                "Center percentage": center_percentage,
-                "Drop percentage": drop_percentage,
+                "Center %": center_percentage,
+                "Freq band": f"{fmin}:{fmax}",
+                "Drop %": drop_percentage,
                 "Kept / Total": f"{kept_mask.sum()} / {len(kept_mask)}",
                 "Mean accuracy": f"{acc:.4f}",
-                "Std": f"{std:.4f}",
+                "Std": f"{std_acc:.4f}",
             }
         ]
     )
@@ -348,8 +520,9 @@ def render_class_spectra_tab() -> None:
 
     progress.progress(100, text="Done.")
 
-    # --- Dropped thumbnails ---
-    n_dropped_total = (~kept_mask).sum()
+    # --- Dropped thumbnails: side-by-side raw + processed ---
+    fn = METHOD_FNS.get(method)
+    n_dropped_total = int((~kept_mask).sum())
     if n_dropped_total > 0:
         st.subheader(f"Dropped images ({n_dropped_total} total)")
         for cls in class_names:
@@ -357,18 +530,39 @@ def render_class_spectra_tab() -> None:
             if not dropped_indices:
                 continue
             with st.expander(f"{cls} — {len(dropped_indices)} dropped"):
-                show_indices = dropped_indices[:24]
-                cols = st.columns(min(6, len(show_indices)))
-                for k, idx in enumerate(show_indices):
+                show_indices = dropped_indices[:12]
+                for idx in show_indices:
                     fname = filenames[idx]
-                    img_path = LABOR_DIR / fname
-                    col = cols[k % 6]
-                    if img_path.exists():
-                        col.image(
-                            str(img_path), caption=f"d={distances[idx]:.2f}", width=100
-                        )
-                    else:
-                        col.text(f"{fname}\nd={distances[idx]:.2f}")
+                    img_path = image_dir / fname
+                    dist_val = distances[idx]
+                    col_raw, col_proc = st.columns(2)
+                    with col_raw:
+                        if img_path.exists():
+                            st.image(
+                                str(img_path),
+                                caption=f"Raw  d={dist_val:.2f}",
+                                width=150,
+                            )
+                        else:
+                            st.text(f"Missing: {fname}")
+                    with col_proc:
+                        if img_path.exists():
+                            raw_img = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
+                            if raw_img is not None and fn is not None:
+                                proc_img = fn(raw_img)
+                                st.image(
+                                    proc_img,
+                                    caption=f"Processed  d={dist_val:.2f}",
+                                    width=150,
+                                )
+                            elif raw_img is not None:
+                                st.image(
+                                    raw_img,
+                                    caption="(raw = processed for 'raw' method)",
+                                    width=150,
+                                )
+                        else:
+                            st.text("—")
 
 
 def main():
@@ -387,20 +581,27 @@ def main():
         st.error("No images found.")
         return
 
-    default_idx = files.index("_DSC1090.JPG") if "_DSC1090.JPG" in files else 0
-    selected = st.selectbox("Select image", files, index=default_idx)
-    image = cv2.imread(str(IMAGE_DIR / selected), cv2.IMREAD_GRAYSCALE)
-    if image is None:
-        st.error(f"Cannot read: {selected}")
-        return
-
     tab_cmp, tab_homo, tab_cls = st.tabs(
-        ["Method comparison", "Homomorphic detail", "Class spectra (Datensatz_Labor)"]
+        ["Method comparison", "Homomorphic detail", "Class spectra"]
     )
     with tab_cmp:
-        render_comparison(image)
+        default_idx = files.index("_DSC1090.JPG") if "_DSC1090.JPG" in files else 0
+        selected = st.selectbox("Select image", files, index=default_idx, key="img_cmp")
+        image = cv2.imread(str(IMAGE_DIR / selected), cv2.IMREAD_GRAYSCALE)
+        if image is not None:
+            render_comparison(image)
+        else:
+            st.error(f"Cannot read: {selected}")
     with tab_homo:
-        render_homomorphic_detail(image)
+        default_idx = files.index("_DSC1090.JPG") if "_DSC1090.JPG" in files else 0
+        selected = st.selectbox(
+            "Select image", files, index=default_idx, key="img_homo"
+        )
+        image = cv2.imread(str(IMAGE_DIR / selected), cv2.IMREAD_GRAYSCALE)
+        if image is not None:
+            render_homomorphic_detail(image)
+        else:
+            st.error(f"Cannot read: {selected}")
     with tab_cls:
         render_class_spectra_tab()
 
