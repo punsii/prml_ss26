@@ -44,7 +44,9 @@ def homomorphic_filter(
     v = np.arange(cols).reshape(1, -1) - ccol
     d_sq = u * u + v * v
     # H(u,v) = (gamma_high - gamma_low) * (1 - exp(-D²/2c²)) + gamma_low
-    h = (gamma_high - gamma_low) * (1.0 - np.exp(-d_sq / (2.0 * cutoff * cutoff))) + gamma_low
+    h = (gamma_high - gamma_low) * (
+        1.0 - np.exp(-d_sq / (2.0 * cutoff * cutoff))
+    ) + gamma_low
 
     dft_shifted = np.fft.fftshift(np.fft.fft2(log_img))
     result = np.real(np.fft.ifft2(np.fft.ifftshift(dft_shifted * h)))

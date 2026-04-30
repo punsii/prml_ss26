@@ -71,11 +71,24 @@ def assemble_full(image: np.ndarray, processed: list[np.ndarray]) -> np.ndarray:
     return out
 
 
-def compute_fft_magnitude(image: np.ndarray) -> np.ndarray:
-    """Log-magnitude FFT spectrum of a grayscale image."""
-    magnitude = np.abs(np.fft.fftshift(np.fft.fft2(image.astype(np.float32))))
-    log_mag = np.log1p(magnitude)
-    return (log_mag / log_mag.max() * 255).astype(np.uint8)
+RADIAL_DC_TRIM = 3  # drop DC + first 2 bins; they dwarf the rest on a linear plot
+
+
+def radial_profile(image: np.ndarray) -> np.ndarray:
+    """Mean FFT magnitude per integer radius.
+
+    Hann-windowed (kills the boundary cross) and cropped to the inscribed
+    circle (keeps the radial average isotropic).
+    """
+    h, w = image.shape
+    win = np.outer(np.hanning(h), np.hanning(w))
+    mag = np.abs(np.fft.fftshift(np.fft.fft2(image.astype(np.float32) * win)))
+    cy, cx = h // 2, w // 2
+    yy, xx = np.indices(mag.shape)
+    r = np.hypot(yy - cy, xx - cx).astype(np.int32)
+    summed = np.bincount(r.ravel(), weights=mag.ravel())
+    counts = np.bincount(r.ravel())
+    return (summed / np.maximum(counts, 1))[: min(cy, cx)]
 
 
 def draw_tile_outlines(image: np.ndarray) -> np.ndarray:
@@ -85,8 +98,13 @@ def draw_tile_outlines(image: np.ndarray) -> np.ndarray:
     th, tw = h // GRID_SIZE, w // GRID_SIZE
     for i in TILE_INDICES:
         for j in TILE_INDICES:
-            cv2.rectangle(out, (j * tw, i * th), ((j + 1) * tw, (i + 1) * th),
-                          color=(0, 0, 255), thickness=20)
+            cv2.rectangle(
+                out,
+                (j * tw, i * th),
+                ((j + 1) * tw, (i + 1) * th),
+                color=(0, 0, 255),
+                thickness=20,
+            )
     return cv2.cvtColor(out, cv2.COLOR_BGR2RGB)
 
 
@@ -102,6 +120,18 @@ def render_tile_grid(images: list[np.ndarray], label: str) -> None:
                 cols[col].image(images[row * n + col], use_container_width=True)
 
 
+def render_chart_grid(profiles: list[np.ndarray], label: str) -> None:
+    """3x3 grid of radial-spectrum line charts (~70% of container width, log y)."""
+    st.subheader(label)
+    n = len(TILE_INDICES)
+    for row in range(n):
+        _, mid, _ = st.columns([1, 5, 1])
+        with mid:
+            cols = st.columns(n)
+            for col in range(n):
+                cols[col].line_chart(np.log1p(profiles[row * n + col][RADIAL_DC_TRIM:]))
+
+
 def render_comparison(image: np.ndarray) -> None:
     """Per method: short description, full-image stitched view, then center-tile detail."""
     original_center = extract_patches(image)[CENTER_IDX]
@@ -112,24 +142,37 @@ def render_comparison(image: np.ndarray) -> None:
         full = assemble_full(image, results)
 
         _, mid, _ = st.columns([1, 2, 1])
-        mid.image(full, caption=f"Full image with {name} applied to the 9 selected tiles",
-                  use_container_width=True)
+        mid.image(
+            full,
+            caption=f"Full image with {name} applied to the 9 selected tiles",
+            use_container_width=True,
+        )
 
         cols = st.columns(4)
-        cols[0].image(original_center, caption="Original (center)", use_container_width=True)
-        cols[1].image(results[CENTER_IDX], caption=f"{name} (center)", use_container_width=True)
-        cols[2].image(compute_fft_magnitude(results[CENTER_IDX]),
-                      caption=f"FFT ({name})", use_container_width=True)
+        cols[0].image(
+            original_center, caption="Original (center)", use_container_width=True
+        )
+        cols[1].image(
+            results[CENTER_IDX], caption=f"{name} (center)", use_container_width=True
+        )
+        with cols[2]:
+            st.line_chart(np.log1p(radial_profile(results[CENTER_IDX])[RADIAL_DC_TRIM:]))
+            st.caption(f"Log radial spectrum ({name})")
         cols[3].metric(f"{name} — 9 tiles", f"{elapsed:.3f}s")
 
 
 def render_homomorphic_detail(image: np.ndarray) -> None:
-    """Full original with tile outlines, then stacked grids: originals, processed, FFTs."""
-    st.markdown("_Per-tile homomorphic results with the full-image context and FFTs of all tiles._")
+    """Full original with tile outlines, then stacked grids: originals, processed, radial spectra."""
+    st.markdown(
+        "_Per-tile homomorphic results with the full-image context and radial spectra of all tiles._"
+    )
 
     _, mid, _ = st.columns([1, 2, 1])
-    mid.image(draw_tile_outlines(image),
-              caption="Full original (red = selected tiles)", use_container_width=True)
+    mid.image(
+        draw_tile_outlines(image),
+        caption="Full original (red = selected tiles)",
+        use_container_width=True,
+    )
 
     patches = extract_patches(image)
     results, elapsed = run_on_patches(homomorphic_filter, image)
@@ -137,7 +180,9 @@ def render_homomorphic_detail(image: np.ndarray) -> None:
 
     render_tile_grid(patches, "Original")
     render_tile_grid(results, "Processed")
-    render_tile_grid([compute_fft_magnitude(r) for r in results], "FFT (processed)")
+    render_chart_grid(
+        [radial_profile(r) for r in results], "Radial spectrum (processed)"
+    )
 
 
 def main():
@@ -149,7 +194,9 @@ def main():
         st.info("Run this app from the repo root directory.")
         return
 
-    files = sorted(f.name for f in IMAGE_DIR.iterdir() if f.suffix.upper() in (".JPG", ".PNG"))
+    files = sorted(
+        f.name for f in IMAGE_DIR.iterdir() if f.suffix.upper() in (".JPG", ".PNG")
+    )
     if not files:
         st.error("No images found.")
         return

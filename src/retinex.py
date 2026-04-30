@@ -31,7 +31,9 @@ def _fast_gaussian(img: np.ndarray, sigma: float) -> np.ndarray:
     # Downsample so effective sigma fits in max_direct_sigma
     scale = sigma / max_direct_sigma
     h, w = img.shape[:2]
-    small = cv2.resize(img, (int(w / scale), int(h / scale)), interpolation=cv2.INTER_AREA)
+    small = cv2.resize(
+        img, (int(w / scale), int(h / scale)), interpolation=cv2.INTER_AREA
+    )
     blurred = cv2.GaussianBlur(small, (0, 0), max_direct_sigma)
     return cv2.resize(blurred, (w, h), interpolation=cv2.INTER_LINEAR)
 

@@ -163,6 +163,7 @@
       checks.${system} = {
         devShell = self.devShells.${system}.default;
         inherit test-specular-diffuse;
+        formatting = treefmtEval.config.build.check self;
 
         # NixOS module evaluation verified via `nix eval .#nixosModules.reflectionRemoval`
       };
