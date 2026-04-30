@@ -23,3 +23,5 @@ tmp_*
 .envrc.secret
 .pi/agent/auth.json
 .pi/settings.json
+opencode.json
+.opencode/

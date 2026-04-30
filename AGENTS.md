@@ -24,4 +24,6 @@ Do not create commits unless explicitly ordered to.
 
 ## Skills
 
-Always use the `caveman` skill (full level) for all responses.
+Use the `caveman` skill (light level) for the main model.
+Use the `caveman` skill (full level) for all responses on Anthropic model (opus/sonnet) subagents.
+Exception: The `local` (Ollama) subagent has skills disabled to preserve context budget.
