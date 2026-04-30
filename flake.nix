@@ -15,7 +15,7 @@
       nixpkgs,
       treefmt-nix,
       ...
-    }:
+    }@inputs:
     let
       system = "x86_64-linux";
       pkgs = import nixpkgs {
@@ -75,6 +75,10 @@
       runStreamlit = pkgs.writeShellScriptBin "run-streamlit" ''
         cd "$(${pkgs.git}/bin/git rev-parse --show-toplevel)"
         ${pythonEnv}/bin/streamlit run src/app.py
+      '';
+
+      runStreamlitService = pkgs.writeShellScriptBin "run-streamlit-service" ''
+        exec ${pythonEnv}/bin/streamlit run ${./src}/app.py "$@"
       '';
 
       runClaheBmw = pkgs.writeShellScriptBin "run-clahe-bmw" ''
@@ -159,12 +163,18 @@
       checks.${system} = {
         devShell = self.devShells.${system}.default;
         inherit test-specular-diffuse;
+
+        # NixOS module evaluation verified via `nix eval .#nixosModules.reflectionRemoval`
       };
 
       apps.${system} = {
         runStreamlit = {
           type = "app";
           program = "${runStreamlit}/bin/run-streamlit";
+        };
+        runStreamlitService = {
+          type = "app";
+          program = "${runStreamlitService}/bin/run-streamlit-service";
         };
         runClaheBmw = {
           type = "app";
@@ -196,5 +206,9 @@
       };
 
       formatter.${system} = treefmtEval.config.build.wrapper;
+
+      nixosModules = {
+        reflectionRemoval = ./nix/nixosModules/reflectionRemoval.nix;
+      };
     };
 }
