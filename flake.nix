@@ -51,6 +51,9 @@
           # utilities
           matplotlib
           streamlit
+          scikit-learn
+          pandas
+          plotly
         ]
       );
 
