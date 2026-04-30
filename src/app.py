@@ -28,10 +28,9 @@ from class_stats import (CLASS_COLORS, compute_class_stats,
                          load_labels_from_dirs, logreg_cv, mahalanobis_filter)
 from homomorphic import homomorphic_filter
 from radial import (GRID_SIZE, RADIAL_DC_TRIM, TILE_INDICES, _radial_from_mag,
-                    center_crop, extract_patches, radial_profile)
+                    center_crop, extract_patches, radial_profile,
+                    radial_profile_center_fraction)
 from retinex import multi_scale_retinex
-
-IMAGE_DIR = Path("data/BMW_25/Rohdaten/Erste Bearbeitungsstufe 10-17ym")
 
 CENTER_IDX = (len(TILE_INDICES) ** 2) // 2  # row-major index of (4,4) tile
 
@@ -94,7 +93,7 @@ def render_tile_grid(images: list[np.ndarray], label: str) -> None:
         with mid:
             cols = st.columns(n)
             for col in range(n):
-                cols[col].image(images[row * n + col], use_container_width=True)
+                cols[col].image(images[row * n + col], width="stretch")
 
 
 def render_chart_grid(profiles: list[np.ndarray], label: str) -> None:
@@ -122,15 +121,15 @@ def render_comparison(image: np.ndarray) -> None:
         mid.image(
             full,
             caption=f"Full image with {name} applied to the 9 selected tiles",
-            use_container_width=True,
+            width="stretch",
         )
 
         cols = st.columns(4)
         cols[0].image(
-            original_center, caption="Original (center)", use_container_width=True
+            original_center, caption="Original (center)", width="stretch"
         )
         cols[1].image(
-            results[CENTER_IDX], caption=f"{name} (center)", use_container_width=True
+            results[CENTER_IDX], caption=f"{name} (center)", width="stretch"
         )
         with cols[2]:
             st.line_chart(
@@ -150,7 +149,7 @@ def render_homomorphic_detail(image: np.ndarray) -> None:
     mid.image(
         draw_tile_outlines(image),
         caption="Full original (red = selected tiles)",
-        use_container_width=True,
+        width="stretch",
     )
 
     patches = extract_patches(image)
@@ -181,10 +180,10 @@ DATASETS = {
 }
 
 BMW_CLASS_COLORS = {
-    "Fr+\ufffdszustand 17-25ym": "red",
-    "Erste Bearbeitungsstufe 10-17ym": "orange",
-    "Zweite Bearbeitungsstufe 3-10ym": "green",
-    "Finaler Zustand kleiner 3ym": "blue",
+    "Step_0_17-25ym": "red",
+    "Step_1_10-17ym": "orange",
+    "Step_2_3-10ym": "green",
+    "Step_3_final_3ym": "blue",
 }
 
 METHOD_FNS = {
@@ -195,31 +194,98 @@ METHOD_FNS = {
 }
 
 
-@st.cache_data(show_spinner="Computing spectra…")
-def _cached_vectors(
-    dataset_name: str, method: str, center_percentage: float
-) -> dict | None:
-    """Cache-keyed on (dataset_name, method, center_percentage). Returns raw vector data."""
+@st.cache_data(show_spinner=False)
+def _cached_rows(dataset_name: str) -> list[tuple[str, str]] | None:
+    """Cache label rows for a dataset (cheap — just reads CSV or directory listing)."""
     cfg = DATASETS[dataset_name]
     image_dir = cfg["image_dir"]
     if not image_dir.exists():
         return None
-
     if cfg["type"] == "csv":
         csv_path = cfg["csv_path"]
         if not csv_path.exists():
             return None
-        rows = load_labels(csv_path)
-    else:
-        rows = load_labels_from_dirs(image_dir)
+        return load_labels(csv_path)
+    return load_labels_from_dirs(image_dir)
 
+
+@st.cache_data(show_spinner=False)
+def _cached_vectors(
+    dataset_name: str, method: str, center_percentage: float
+) -> dict | None:
+    """Cache-keyed on (dataset_name, method, center_percentage). Returns raw vector data."""
+    rows = _cached_rows(dataset_name)
+    if rows is None:
+        return None
+    cfg = DATASETS[dataset_name]
     fn = METHOD_FNS.get(method)
     vectors, labels, filenames = compute_full_image_vectors(
-        rows, image_dir, fn, center_percentage
+        rows, cfg["image_dir"], fn, center_percentage
     )
     if len(vectors) == 0:
         return None
     return {"vectors": vectors, "labels": labels, "filenames": filenames}
+
+
+def _load_vectors_with_progress(
+    dataset_name: str, method: str, center_percentage: float
+) -> dict | None:
+    """Load vectors with a real progress bar on first run; instant on cache hit."""
+    cache_key = f"vectors_{dataset_name}_{method}_{center_percentage}"
+    if cache_key in st.session_state:
+        return st.session_state[cache_key]
+
+    rows = _cached_rows(dataset_name)
+    if rows is None:
+        return None
+
+    cfg = DATASETS[dataset_name]
+    image_dir = cfg["image_dir"]
+    fn = METHOD_FNS.get(method)
+
+    progress = st.progress(0, text="Loading images…")
+
+    profiles: list[np.ndarray] = []
+    labels_list: list[str] = []
+    filenames_list: list[str] = []
+    n = len(rows)
+
+    for i, (fname, label) in enumerate(rows):
+        path = image_dir / fname
+        if not path.exists():
+            continue
+        img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            continue
+        if fn is not None:
+            img = fn(img)
+        profiles.append(radial_profile_center_fraction(img, center_percentage))
+        labels_list.append(label)
+        filenames_list.append(fname)
+
+        pct = int((i + 1) / n * 90)
+        progress.progress(pct, text=f"Loading images… {i + 1}/{n}")
+
+    progress.progress(95, text="Assembling vectors…")
+
+    if not profiles:
+        progress.empty()
+        return None
+
+    min_len = min(len(p) for p in profiles)
+    vectors = np.array([p[:min_len] for p in profiles])
+    result = {
+        "vectors": vectors,
+        "labels": np.array(labels_list),
+        "filenames": filenames_list,
+    }
+
+    progress.progress(100, text="Done.")
+    progress.empty()
+
+    # Also populate st.cache_data so future calls via _cached_vectors are instant
+    st.session_state[cache_key] = result
+    return result
 
 
 def _render_fft_explorer(
@@ -251,14 +317,10 @@ def _render_fft_explorer(
         st.warning("No images found for FFT explorer.")
         return
 
-    def _safe(s: str) -> str:
-        """Re-encode surrogate-escaped bytes (from broken locale) as UTF-8."""
-        return s.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
-
     if cfg["type"] == "dirs":
-        labels_display = [_safe(f"[{p.parent.name}] {p.name}") for p in img_paths]
+        labels_display = [f"[{p.parent.name}] {p.name}" for p in img_paths]
     else:
-        labels_display = [_safe(str(p.relative_to(image_dir))) for p in img_paths]
+        labels_display = [str(p.relative_to(image_dir)) for p in img_paths]
     sel_idx = st.selectbox(
         "Image",
         range(len(labels_display)),
@@ -281,19 +343,11 @@ def _render_fft_explorer(
 
     col_orig, col_a, col_b = st.columns(3)
     with col_orig:
-        st.image(raw_img, caption="Original", use_container_width=True)
+        st.image(raw_img, caption="Original", width="stretch")
     with col_a:
-        fig_2d = go.Figure(
-            go.Heatmap(z=mag.tolist(), colorscale="Viridis", showscale=False)
-        )
-        fig_2d.update_layout(
-            title="2D FFT magnitude",
-            xaxis=dict(showticklabels=False),
-            yaxis=dict(showticklabels=False, scaleanchor="x"),
-            height=350,
-            margin=dict(l=0, r=0, t=30, b=0),
-        )
-        st.plotly_chart(fig_2d, use_container_width=True)
+        log_mag = np.log1p(mag)
+        fft_gray = (log_mag / log_mag.max() * 255).astype(np.uint8)
+        st.image(fft_gray, caption="2D FFT magnitude (log)", width="stretch")
     with col_b:
         profile = _radial_from_mag(mag)
         x_bins = list(range(len(profile)))
@@ -308,7 +362,7 @@ def _render_fft_explorer(
             height=350,
             margin=dict(l=0, r=0, t=30, b=0),
         )
-        st.plotly_chart(fig_rad, use_container_width=True)
+        st.plotly_chart(fig_rad, width="stretch")
 
 
 def render_class_spectra_tab() -> None:
@@ -382,13 +436,10 @@ def render_class_spectra_tab() -> None:
         st.info("Press 'Compute' to run the analysis.")
         return
 
-    progress = st.progress(0, text="Loading images…")
-    cached = _cached_vectors(dataset_name, method, center_percentage)
-    progress.progress(40, text="Filtering outliers…")
+    cached = _load_vectors_with_progress(dataset_name, method, center_percentage)
 
     if cached is None:
         st.error("No images found or data unavailable.")
-        progress.empty()
         return
 
     vectors = cached["vectors"]
@@ -403,19 +454,18 @@ def render_class_spectra_tab() -> None:
         st.error(
             f"freq_min ({fmin}) must be less than freq_max ({fmax}). Vector length: {actual_max}."
         )
-        progress.empty()
         return
 
     vectors_b = vectors[:, fmin:fmax]
     bin_axis = list(range(fmin, fmax))
 
-    kept_mask, distances, dropped_per_class = mahalanobis_filter(
-        vectors_b, labels, drop_percentage
-    )
+    with st.spinner("Filtering outliers…"):
+        kept_mask, distances, dropped_per_class = mahalanobis_filter(
+            vectors_b, labels, drop_percentage
+        )
 
     vectors_f = vectors_b[kept_mask]
     labels_f = labels[kept_mask]
-    progress.progress(70, text="Computing statistics…")
 
     class_names = sorted(np.unique(labels).tolist())
     class_stats_data = compute_class_stats(vectors_f, labels_f)
@@ -456,7 +506,7 @@ def render_class_spectra_tab() -> None:
         yaxis_title="Mean FFT magnitude (log)",
         height=400,
     )
-    st.plotly_chart(fig_spec, use_container_width=True)
+    st.plotly_chart(fig_spec, width="stretch")
 
     # --- Plot 2: PCA 3D scatter ---
     if vectors_f.shape[0] >= 3 and vectors_f.shape[1] >= 3:
@@ -491,7 +541,7 @@ def render_class_spectra_tab() -> None:
             ),
             height=600,
         )
-        st.plotly_chart(fig_pca, use_container_width=True)
+        st.plotly_chart(fig_pca, width="stretch")
     else:
         st.info("Not enough samples/dimensions for PCA 3D after filtering.")
 
@@ -516,9 +566,7 @@ def render_class_spectra_tab() -> None:
             }
         ]
     )
-    st.dataframe(df_lr, use_container_width=True)
-
-    progress.progress(100, text="Done.")
+    st.dataframe(df_lr, width="stretch")
 
     # --- Dropped thumbnails: side-by-side raw + processed ---
     fn = METHOD_FNS.get(method)
@@ -569,35 +617,39 @@ def main():
     st.set_page_config(layout="wide", page_title="Reflection Removal Comparison")
     st.title("Brightness Normalization Comparison (patch mode, grayscale)")
 
-    if not IMAGE_DIR.exists():
-        st.error(f"Image directory not found: `{IMAGE_DIR}`")
+    if not BMW_DIR.exists():
+        st.error(f"Image directory not found: `{BMW_DIR}`")
         st.info("Run this app from the repo root directory.")
         return
 
-    files = sorted(
-        f.name for f in IMAGE_DIR.iterdir() if f.suffix.upper() in (".JPG", ".PNG")
-    )
-    if not files:
+    exts = {".jpg", ".jpeg", ".png", ".bmp"}
+    img_entries = [
+        (f"[{subdir.name}] {p.name}", p)
+        for subdir in sorted(BMW_DIR.iterdir())
+        if subdir.is_dir()
+        for p in sorted(subdir.iterdir())
+        if p.suffix.lower() in exts
+    ]
+    if not img_entries:
         st.error("No images found.")
         return
+
+    display_names = [label for label, _ in img_entries]
+    img_paths_map = {label: path for label, path in img_entries}
 
     tab_cmp, tab_homo, tab_cls = st.tabs(
         ["Method comparison", "Homomorphic detail", "Class spectra"]
     )
     with tab_cmp:
-        default_idx = files.index("_DSC1090.JPG") if "_DSC1090.JPG" in files else 0
-        selected = st.selectbox("Select image", files, index=default_idx, key="img_cmp")
-        image = cv2.imread(str(IMAGE_DIR / selected), cv2.IMREAD_GRAYSCALE)
+        selected = st.selectbox("Select image", display_names, index=0, key="img_cmp")
+        image = cv2.imread(str(img_paths_map[selected]), cv2.IMREAD_GRAYSCALE)
         if image is not None:
             render_comparison(image)
         else:
             st.error(f"Cannot read: {selected}")
     with tab_homo:
-        default_idx = files.index("_DSC1090.JPG") if "_DSC1090.JPG" in files else 0
-        selected = st.selectbox(
-            "Select image", files, index=default_idx, key="img_homo"
-        )
-        image = cv2.imread(str(IMAGE_DIR / selected), cv2.IMREAD_GRAYSCALE)
+        selected = st.selectbox("Select image", display_names, index=0, key="img_homo")
+        image = cv2.imread(str(img_paths_map[selected]), cv2.IMREAD_GRAYSCALE)
         if image is not None:
             render_homomorphic_detail(image)
         else:

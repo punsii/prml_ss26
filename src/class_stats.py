@@ -57,15 +57,12 @@ def load_labels_from_dirs(root_dir: Path) -> list[tuple[str, str]]:
     Supported extensions: .jpg, .jpeg, .png, .bmp (case-insensitive).
     """
 
-    def _safe(s: str) -> str:
-        return s.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
-
     rows: list[tuple[str, str]] = []
     exts = {".jpg", ".jpeg", ".png", ".bmp"}
     for subdir in sorted(root_dir.iterdir()):
         if not subdir.is_dir():
             continue
-        label = _safe(subdir.name)
+        label = subdir.name
         for img_file in sorted(subdir.iterdir()):
             if img_file.suffix.lower() in exts:
                 rows.append((f"{subdir.name}/{img_file.name}", label))
