@@ -6,8 +6,10 @@ unused so kernels on the selected tiles never need padding from outside
 the image.
 """
 
+import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 # Ensure src/ is on sys.path when run from repo root
@@ -125,12 +127,8 @@ def render_comparison(image: np.ndarray) -> None:
         )
 
         cols = st.columns(4)
-        cols[0].image(
-            original_center, caption="Original (center)", width="stretch"
-        )
-        cols[1].image(
-            results[CENTER_IDX], caption=f"{name} (center)", width="stretch"
-        )
+        cols[0].image(original_center, caption="Original (center)", width="stretch")
+        cols[1].image(results[CENTER_IDX], caption=f"{name} (center)", width="stretch")
         with cols[2]:
             st.line_chart(
                 np.log1p(radial_profile(results[CENTER_IDX])[RADIAL_DC_TRIM:])
@@ -243,28 +241,47 @@ def _load_vectors_with_progress(
     image_dir = cfg["image_dir"]
     fn = METHOD_FNS.get(method)
 
-    progress = st.progress(0, text="Loading images…")
+    n_workers = min(8, (os.cpu_count() or 1))
+    n = len(rows)
+    progress = st.progress(0, text=f"Loading images… 0/{n}")
+
+    def _process_one(args: tuple) -> tuple | None:
+        fname, label = args
+        path = image_dir / fname
+        if not path.exists():
+            return None
+        img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            return None
+        if fn is not None:
+            img = fn(img)
+        return (fname, label, radial_profile_center_fraction(img, center_percentage))
+
+    # Submit all tasks; collect results in completion order for progress, then
+    # re-sort by original index to preserve row order for reproducibility.
+    ordered: dict[int, tuple] = {}
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        future_to_idx = {
+            pool.submit(_process_one, row): i for i, row in enumerate(rows)
+        }
+        done_count = 0
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            result = future.result()
+            if result is not None:
+                ordered[idx] = result
+            done_count += 1
+            pct = int(done_count / n * 90)
+            progress.progress(pct, text=f"Loading images… {done_count}/{n}")
 
     profiles: list[np.ndarray] = []
     labels_list: list[str] = []
     filenames_list: list[str] = []
-    n = len(rows)
-
-    for i, (fname, label) in enumerate(rows):
-        path = image_dir / fname
-        if not path.exists():
-            continue
-        img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
-        if img is None:
-            continue
-        if fn is not None:
-            img = fn(img)
-        profiles.append(radial_profile_center_fraction(img, center_percentage))
-        labels_list.append(label)
+    for idx in sorted(ordered):
+        fname, label, profile = ordered[idx]
         filenames_list.append(fname)
-
-        pct = int((i + 1) / n * 90)
-        progress.progress(pct, text=f"Loading images… {i + 1}/{n}")
+        labels_list.append(label)
+        profiles.append(profile)
 
     progress.progress(95, text="Assembling vectors…")
 
