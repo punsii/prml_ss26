@@ -13,6 +13,9 @@ dist/
 # Project data (symlinked, not tracked)
 data
 
+# Local example outputs
+examples/
+
 # Secrets & local config
 .envrc.secret
 .pi/agent/auth.json
