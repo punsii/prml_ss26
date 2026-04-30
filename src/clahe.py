@@ -2,8 +2,8 @@
 CLAHE (Contrast Limited Adaptive Histogram Equalization) for local
 brightness normalization of metal surface images.
 
-Applies CLAHE to the L channel in LAB color space, preserving color
-information while normalizing local brightness/contrast.
+Operates on grayscale: divides image into tiles and equalizes histogram
+per tile with contrast limiting.
 """
 
 import argparse
@@ -17,15 +17,12 @@ def apply_clahe(
     clip_limit: float = 2.0,
     tile_size: int = 8,
 ) -> cv2.typing.MatLike:
-    """Apply CLAHE to an BGR image via the L channel in LAB space."""
-    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
-    l, a, b = cv2.split(lab)
+    """Apply CLAHE to a single-channel uint8 image."""
     clahe = cv2.createCLAHE(
         clipLimit=clip_limit,
         tileGridSize=(tile_size, tile_size),
     )
-    l = clahe.apply(l)
-    return cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
+    return clahe.apply(image)
 
 
 def main() -> None:
@@ -42,7 +39,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    image = cv2.imread(str(args.input))
+    image = cv2.imread(str(args.input), cv2.IMREAD_GRAYSCALE)
     if image is None:
         raise FileNotFoundError(f"Cannot read image: {args.input}")
 

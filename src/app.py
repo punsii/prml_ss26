@@ -1,8 +1,9 @@
-"""Streamlit app: compare brightness normalization methods in patch mode.
+"""Streamlit app: compare brightness normalization methods in patch mode (grayscale).
 
-Each image is split into a 9x9 grid; the 9 tiles at row/col indices (1, 4, 7)
-are processed independently. Outer tiles are unused so kernels on the
-selected tiles never need padding from outside the image.
+Each image is loaded as grayscale and split into a 9x9 grid; the 9 tiles at
+row/col indices (1, 4, 7) are processed independently. Outer tiles are
+unused so kernels on the selected tiles never need padding from outside
+the image.
 """
 
 import sys
@@ -27,9 +28,18 @@ TILE_INDICES = (1, 4, 7)
 CENTER_IDX = (len(TILE_INDICES) ** 2) // 2  # row-major index of (4,4) tile
 
 METHODS = {
-    "CLAHE": apply_clahe,
-    "Retinex": multi_scale_retinex,
-    "Homomorphic": homomorphic_filter,
+    "CLAHE": (
+        apply_clahe,
+        "Tile-based histogram equalization with contrast clipping. Cheap, no spectral assumptions.",
+    ),
+    "Retinex": (
+        multi_scale_retinex,
+        "Log-domain illumination subtraction at multiple Gaussian scales (15/80/250).",
+    ),
+    "Homomorphic": (
+        homomorphic_filter,
+        "Gaussian high-pass in the log-frequency domain. Suppresses slow illumination, keeps texture.",
+    ),
 }
 
 
@@ -51,63 +61,88 @@ def run_on_patches(func, image: np.ndarray) -> tuple[list[np.ndarray], float]:
     return results, time.perf_counter() - t0
 
 
+def assemble_full(image: np.ndarray, processed: list[np.ndarray]) -> np.ndarray:
+    """Insert the 9 processed tiles into a copy of the image at their grid positions."""
+    out = image.copy()
+    h, w = image.shape[:2]
+    th, tw = h // GRID_SIZE, w // GRID_SIZE
+    for k, (i, j) in enumerate((i, j) for i in TILE_INDICES for j in TILE_INDICES):
+        out[i * th : (i + 1) * th, j * tw : (j + 1) * tw] = processed[k]
+    return out
+
+
 def compute_fft_magnitude(image: np.ndarray) -> np.ndarray:
-    """Log-magnitude FFT spectrum of a BGR image (as grayscale)."""
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY).astype(np.float32)
-    magnitude = np.abs(np.fft.fftshift(np.fft.fft2(gray)))
+    """Log-magnitude FFT spectrum of a grayscale image."""
+    magnitude = np.abs(np.fft.fftshift(np.fft.fft2(image.astype(np.float32))))
     log_mag = np.log1p(magnitude)
     return (log_mag / log_mag.max() * 255).astype(np.uint8)
 
 
+def draw_tile_outlines(image: np.ndarray) -> np.ndarray:
+    """Return RGB image with red rectangles around selected tiles (input is grayscale)."""
+    out = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    h, w = image.shape[:2]
+    th, tw = h // GRID_SIZE, w // GRID_SIZE
+    for i in TILE_INDICES:
+        for j in TILE_INDICES:
+            cv2.rectangle(out, (j * tw, i * th), ((j + 1) * tw, (i + 1) * th),
+                          color=(0, 0, 255), thickness=20)
+    return cv2.cvtColor(out, cv2.COLOR_BGR2RGB)
+
+
+def render_tile_grid(images: list[np.ndarray], label: str) -> None:
+    """Render a 3x3 grid of tile images under a header (~70% of container width)."""
+    st.subheader(label)
+    n = len(TILE_INDICES)
+    for row in range(n):
+        _, mid, _ = st.columns([1, 5, 1])
+        with mid:
+            cols = st.columns(n)
+            for col in range(n):
+                cols[col].image(images[row * n + col], use_container_width=True)
+
+
 def render_comparison(image: np.ndarray) -> None:
-    """Side-by-side comparison of all methods on the center tile."""
+    """Per method: short description, full-image stitched view, then center-tile detail."""
     original_center = extract_patches(image)[CENTER_IDX]
-    original_rgb = cv2.cvtColor(original_center, cv2.COLOR_BGR2RGB)
 
-    cols = st.columns(4)
-    cols[0].subheader("Original (center)")
-    cols[1].subheader("Result (center)")
-    cols[2].subheader("FFT (result)")
-    cols[3].subheader("Time (9 tiles)")
-
-    for name, func in METHODS.items():
+    for name, (func, description) in METHODS.items():
+        st.markdown(f"### {name}\n_{description}_")
         results, elapsed = run_on_patches(func, image)
-        center_rgb = cv2.cvtColor(results[CENTER_IDX], cv2.COLOR_BGR2RGB)
-        fft = compute_fft_magnitude(results[CENTER_IDX])
+        full = assemble_full(image, results)
+
+        _, mid, _ = st.columns([1, 2, 1])
+        mid.image(full, caption=f"Full image with {name} applied to the 9 selected tiles",
+                  use_container_width=True)
 
         cols = st.columns(4)
-        cols[0].image(original_rgb, caption="Original", use_container_width=True)
-        cols[1].image(center_rgb, caption=name, use_container_width=True)
-        cols[2].image(fft, caption=f"FFT ({name})", use_container_width=True)
-        cols[3].metric(name, f"{elapsed:.3f}s")
+        cols[0].image(original_center, caption="Original (center)", use_container_width=True)
+        cols[1].image(results[CENTER_IDX], caption=f"{name} (center)", use_container_width=True)
+        cols[2].image(compute_fft_magnitude(results[CENTER_IDX]),
+                      caption=f"FFT ({name})", use_container_width=True)
+        cols[3].metric(f"{name} — 9 tiles", f"{elapsed:.3f}s")
 
 
 def render_homomorphic_detail(image: np.ndarray) -> None:
-    """Full image plus original/processed pair per tile, in 3x3 spatial layout."""
-    st.image(cv2.cvtColor(image, cv2.COLOR_BGR2RGB),
-             caption="Full original", use_container_width=True)
+    """Full original with tile outlines, then stacked grids: originals, processed, FFTs."""
+    st.markdown("_Per-tile homomorphic results with the full-image context and FFTs of all tiles._")
+
+    _, mid, _ = st.columns([1, 2, 1])
+    mid.image(draw_tile_outlines(image),
+              caption="Full original (red = selected tiles)", use_container_width=True)
 
     patches = extract_patches(image)
     results, elapsed = run_on_patches(homomorphic_filter, image)
     st.metric("Homomorphic — time (9 tiles)", f"{elapsed:.3f}s")
 
-    n = len(TILE_INDICES)
-    for row in range(n):
-        cols = st.columns(n)
-        for col in range(n):
-            idx = row * n + col
-            i, j = TILE_INDICES[row], TILE_INDICES[col]
-            with cols[col]:
-                st.caption(f"tile ({i}, {j})")
-                st.image(cv2.cvtColor(patches[idx], cv2.COLOR_BGR2RGB),
-                         caption="original", use_container_width=True)
-                st.image(cv2.cvtColor(results[idx], cv2.COLOR_BGR2RGB),
-                         caption="processed", use_container_width=True)
+    render_tile_grid(patches, "Original")
+    render_tile_grid(results, "Processed")
+    render_tile_grid([compute_fft_magnitude(r) for r in results], "FFT (processed)")
 
 
 def main():
     st.set_page_config(layout="wide", page_title="Reflection Removal Comparison")
-    st.title("Brightness Normalization Comparison (patch mode)")
+    st.title("Brightness Normalization Comparison (patch mode, grayscale)")
 
     if not IMAGE_DIR.exists():
         st.error(f"Image directory not found: `{IMAGE_DIR}`")
@@ -121,7 +156,7 @@ def main():
 
     default_idx = files.index("_DSC1090.JPG") if "_DSC1090.JPG" in files else 0
     selected = st.selectbox("Select image", files, index=default_idx)
-    image = cv2.imread(str(IMAGE_DIR / selected))
+    image = cv2.imread(str(IMAGE_DIR / selected), cv2.IMREAD_GRAYSCALE)
     if image is None:
         st.error(f"Cannot read: {selected}")
         return

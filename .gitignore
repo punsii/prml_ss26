@@ -16,6 +16,9 @@ data
 # Local example outputs
 examples/
 
+# Scratch files
+tmp_*
+
 # Secrets & local config
 .envrc.secret
 .pi/agent/auth.json

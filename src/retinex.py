@@ -40,14 +40,14 @@ def multi_scale_retinex(
     image: np.ndarray,
     sigmas: tuple[float, ...] = (15.0, 80.0, 250.0),
 ) -> np.ndarray:
-    """Apply Multi-Scale Retinex to a BGR uint8 image.
+    """Apply Multi-Scale Retinex to a grayscale uint8 image.
 
     Args:
-        image: Input BGR image (uint8).
+        image: Input grayscale image (uint8).
         sigmas: Gaussian blur sigmas for each scale.
 
     Returns:
-        Normalized BGR image (uint8).
+        Normalized grayscale image (uint8).
     """
     img = image.astype(np.float32) + 1.0  # avoid log(0)
     log_img = np.log(img)
@@ -58,11 +58,7 @@ def multi_scale_retinex(
         retinex += log_img - np.log(blurred + 1.0)
     retinex /= len(sigmas)
 
-    # Normalize to [0, 255]
-    for c in range(3):
-        ch = retinex[:, :, c]
-        retinex[:, :, c] = (ch - ch.min()) / (ch.max() - ch.min() + 1e-10)
-
+    retinex = (retinex - retinex.min()) / (retinex.max() - retinex.min() + 1e-10)
     return (retinex * 255).clip(0, 255).astype(np.uint8)
 
 
@@ -81,7 +77,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    image = cv2.imread(str(args.input))
+    image = cv2.imread(str(args.input), cv2.IMREAD_GRAYSCALE)
     if image is None:
         raise FileNotFoundError(f"Cannot read image: {args.input}")
 

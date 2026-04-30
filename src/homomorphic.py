@@ -24,22 +24,21 @@ def homomorphic_filter(
     gamma_high: float = 1.5,
     cutoff: float = 30.0,
 ) -> np.ndarray:
-    """Apply homomorphic filtering to a BGR uint8 image.
+    """Apply homomorphic filtering to a grayscale uint8 image.
 
     Args:
-        image: Input BGR image (uint8).
+        image: Input grayscale image (uint8).
         gamma_low: Gain for low frequencies (illumination). <1 suppresses.
         gamma_high: Gain for high frequencies (reflectance). >1 enhances.
         cutoff: Filter cutoff frequency in pixels.
 
     Returns:
-        Filtered BGR image (uint8).
+        Filtered grayscale image (uint8).
     """
     img = image.astype(np.float32) + 1.0
     log_img = np.log(img)
 
-    # Build Gaussian high-pass filter in frequency domain
-    rows, cols = img.shape[:2]
+    rows, cols = img.shape
     crow, ccol = rows // 2, cols // 2
     u = np.arange(rows).reshape(-1, 1) - crow
     v = np.arange(cols).reshape(1, -1) - ccol
@@ -47,18 +46,10 @@ def homomorphic_filter(
     # H(u,v) = (gamma_high - gamma_low) * (1 - exp(-D²/2c²)) + gamma_low
     h = (gamma_high - gamma_low) * (1.0 - np.exp(-d_sq / (2.0 * cutoff * cutoff))) + gamma_low
 
-    result = np.empty_like(img)
-    for c in range(3):
-        # DFT, shift, filter, inverse
-        dft = np.fft.fft2(log_img[:, :, c])
-        dft_shifted = np.fft.fftshift(dft)
-        filtered = dft_shifted * h
-        ch = np.real(np.fft.ifft2(np.fft.ifftshift(filtered)))
-        # Back from log domain
-        ch = np.exp(ch) - 1.0
-        # Normalize to [0, 255]
-        ch = (ch - ch.min()) / (ch.max() - ch.min() + 1e-10) * 255.0
-        result[:, :, c] = ch
+    dft_shifted = np.fft.fftshift(np.fft.fft2(log_img))
+    result = np.real(np.fft.ifft2(np.fft.ifftshift(dft_shifted * h)))
+    result = np.exp(result) - 1.0
+    result = (result - result.min()) / (result.max() - result.min() + 1e-10) * 255.0
 
     return result.clip(0, 255).astype(np.uint8)
 
@@ -80,7 +71,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    image = cv2.imread(str(args.input))
+    image = cv2.imread(str(args.input), cv2.IMREAD_GRAYSCALE)
     if image is None:
         raise FileNotFoundError(f"Cannot read image: {args.input}")
 
