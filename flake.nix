@@ -50,6 +50,7 @@
 
           # utilities
           matplotlib
+          streamlit
         ]
       );
 
@@ -69,6 +70,11 @@
         test -f output/test_input_specular.png
         mkdir -p $out
         cp output/*.png $out/
+      '';
+
+      runStreamlit = pkgs.writeShellScriptBin "run-streamlit" ''
+        cd "$(${pkgs.git}/bin/git rev-parse --show-toplevel)"
+        ${pythonEnv}/bin/streamlit run src/app.py
       '';
 
       runClaheBmw = pkgs.writeShellScriptBin "run-clahe-bmw" ''
@@ -156,6 +162,10 @@
       };
 
       apps.${system} = {
+        runStreamlit = {
+          type = "app";
+          program = "${runStreamlit}/bin/run-streamlit";
+        };
         runClaheBmw = {
           type = "app";
           program = "${runClaheBmw}/bin/run-clahe-bmw";
