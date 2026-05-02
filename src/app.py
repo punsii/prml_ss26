@@ -525,6 +525,47 @@ def render_class_spectra_tab() -> None:
     )
     st.plotly_chart(fig_spec, width="stretch")
 
+    # --- Plot 1b: Waterfall spectra ---
+    with st.expander("Waterfall spectra (per-image 3D)", expanded=False):
+        fig_wf = go.Figure()
+        for cls in class_names:
+            mask = labels_f == cls
+            if not mask.any():
+                continue
+            color = colors.get(cls, "gray")
+            cls_vecs = vectors_f[mask]
+            x_all: list = []
+            y_all: list = []
+            z_all: list = []
+            for i, row in enumerate(cls_vecs):
+                z_row = np.log10(np.maximum(row, 1e-6))
+                x_all.extend(bin_axis)
+                y_all.extend([i] * len(bin_axis))
+                z_all.extend(z_row.tolist())
+                x_all.append(None)
+                y_all.append(None)
+                z_all.append(None)
+            fig_wf.add_trace(
+                go.Scatter3d(
+                    x=x_all,
+                    y=y_all,
+                    z=z_all,
+                    mode="lines",
+                    line=dict(color=color, width=1),
+                    name=cls,
+                )
+            )
+        fig_wf.update_layout(
+            title=f"Waterfall spectra — {dataset_name} — {method}  [bins {fmin}:{fmax}]",
+            scene=dict(
+                xaxis_title="Radial bin",
+                yaxis_title="Image index (within class)",
+                zaxis_title="log₁₀ FFT magnitude",
+            ),
+            height=700,
+        )
+        st.plotly_chart(fig_wf, width="stretch")
+
     # --- Plot 2: PCA 3D scatter ---
     if vectors_f.shape[0] >= 3 and vectors_f.shape[1] >= 3:
         scaler = StandardScaler()

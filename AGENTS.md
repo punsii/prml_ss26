@@ -20,7 +20,8 @@ Do not run other build/test commands directly.
 
 ## Commits
 
-Do not create commits unless explicitly ordered to.
+**NEVER create commits unless the user explicitly orders it with words like "commit" or "commit this".**
+Completing a task does NOT imply permission to commit. When in doubt, do not commit.
 
 ## Skills
 
