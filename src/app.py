@@ -386,7 +386,7 @@ def render_class_spectra_tab() -> None:
     st.header("Class spectra")
 
     # --- Dataset selector ---
-    dataset_name = st.selectbox("Dataset", list(DATASETS.keys()), index=0)
+    dataset_name = st.selectbox("Dataset", list(DATASETS.keys()), index=1)
     cfg = DATASETS[dataset_name]
     image_dir: Path = cfg["image_dir"]
     colors = CLASS_COLORS if dataset_name == "Datensatz Labor" else BMW_CLASS_COLORS
@@ -534,13 +534,15 @@ def render_class_spectra_tab() -> None:
                 continue
             color = colors.get(cls, "gray")
             cls_vecs = vectors_f[mask]
+            n_imgs = len(cls_vecs)
             x_all: list = []
             y_all: list = []
             z_all: list = []
             for i, row in enumerate(cls_vecs):
+                y_norm = i / max(n_imgs - 1, 1)
                 z_row = np.log10(np.maximum(row, 1e-6))
                 x_all.extend(bin_axis)
-                y_all.extend([i] * len(bin_axis))
+                y_all.extend([y_norm] * len(bin_axis))
                 z_all.extend(z_row.tolist())
                 x_all.append(None)
                 y_all.append(None)
@@ -551,7 +553,7 @@ def render_class_spectra_tab() -> None:
                     y=y_all,
                     z=z_all,
                     mode="lines",
-                    line=dict(color=color, width=1),
+                    line=dict(color=color, width=2),
                     name=cls,
                 )
             )
@@ -559,7 +561,7 @@ def render_class_spectra_tab() -> None:
             title=f"Waterfall spectra — {dataset_name} — {method}  [bins {fmin}:{fmax}]",
             scene=dict(
                 xaxis_title="Radial bin",
-                yaxis_title="Image index (within class)",
+                yaxis_title="Image index (normalised)",
                 zaxis_title="log₁₀ FFT magnitude",
             ),
             height=700,
