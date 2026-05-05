@@ -20,6 +20,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
@@ -28,6 +29,7 @@ from clahe import apply_clahe
 from class_stats import (CLASS_COLORS, compute_class_stats,
                          compute_full_image_vectors, load_labels,
                          load_labels_from_dirs, logreg_cv, mahalanobis_filter)
+from percentile_atlas import build_atlas, mad_loo_cv, rank_profiles, score_spectrum
 from homomorphic import homomorphic_filter
 from radial import (GRID_SIZE, RADIAL_DC_TRIM, TILE_INDICES, _radial_from_mag,
                     center_crop, extract_patches, radial_profile,
@@ -568,6 +570,55 @@ def render_class_spectra_tab() -> None:
         )
         st.plotly_chart(fig_wf, width="stretch")
 
+    # --- Plot 1c: Percentile atlas ---
+    with st.expander("Percentile atlas (per-class)", expanded=False):
+        percentiles = np.arange(1, 101)
+        atlas: dict[str, np.ndarray] = {}
+        for cls in class_names:
+            mask = labels_f == cls
+            if not mask.any():
+                continue
+            cls_vecs = vectors_f[mask]
+            # percentile() returns (100, n_bins); transpose to (n_bins, 100)
+            atlas[cls] = np.log10(np.maximum(
+                np.percentile(cls_vecs, percentiles, axis=0), 1e-6
+            )).T
+
+        if atlas:
+            cls_list = [c for c in class_names if c in atlas]
+            zmin = float(min(v.min() for v in atlas.values()))
+            zmax = float(max(v.max() for v in atlas.values()))
+
+            fig_atl = make_subplots(
+                rows=1,
+                cols=len(cls_list),
+                subplot_titles=cls_list,
+                shared_yaxes=True,
+            )
+            for col_i, cls in enumerate(cls_list, start=1):
+                fig_atl.add_trace(
+                    go.Heatmap(
+                        z=atlas[cls].tolist(),
+                        x=percentiles.tolist(),
+                        y=bin_axis,
+                        colorscale="Viridis",
+                        zmin=zmin,
+                        zmax=zmax,
+                        showscale=(col_i == len(cls_list)),
+                        colorbar=dict(title="log₁₀ magnitude"),
+                        hovertemplate="Percentile: %{x}<br>Bin: %{y}<br>log₁₀ mag: %{z:.2f}<extra></extra>",
+                    ),
+                    row=1,
+                    col=col_i,
+                )
+                fig_atl.update_xaxes(title_text="Percentile", row=1, col=col_i)
+            fig_atl.update_yaxes(title_text="Radial bin", row=1, col=1)
+            fig_atl.update_layout(
+                title=f"Percentile atlas — {dataset_name} — {method}  [bins {fmin}:{fmax}]",
+                height=500,
+            )
+            st.plotly_chart(fig_atl, width="stretch")
+
     # --- Plot 2: PCA 3D scatter ---
     if vectors_f.shape[0] >= 3 and vectors_f.shape[1] >= 3:
         scaler = StandardScaler()
@@ -605,31 +656,87 @@ def render_class_spectra_tab() -> None:
     else:
         st.info("Not enough samples/dimensions for PCA 3D after filtering.")
 
-    # --- Logreg ---
-    acc, std_acc = logreg_cv(vectors_f, labels_f)
-    st.subheader("Logistic regression CV accuracy (filtered)")
+    # --- CV accuracy comparison ---
+    acc_lr, std_lr = logreg_cv(vectors_f, labels_f)
+    with st.spinner("MAD LOO CV…"):
+        acc_mad = mad_loo_cv(vectors_f, labels_f)
+    st.subheader("Classification accuracy (filtered)")
     st.caption(
-        "Multinomial logistic regression on band-limited filtered radial profile vectors. "
-        "5-fold stratified CV."
+        "LR: multinomial logistic regression, 5-fold stratified CV.  "
+        "MAD: percentile atlas, leave-one-out CV, MAD-from-50 scoring."
     )
-    df_lr = pd.DataFrame(
-        [
-            {
-                "Dataset": dataset_name,
-                "Method": method,
-                "Center %": center_percentage,
-                "Freq band": f"{fmin}:{fmax}",
-                "Drop %": drop_percentage,
-                "Kept / Total": f"{kept_mask.sum()} / {len(kept_mask)}",
-                "Mean accuracy": f"{acc:.4f}",
-                "Std": f"{std_acc:.4f}",
-            }
-        ]
+    shared = {
+        "Dataset": dataset_name,
+        "Method": method,
+        "Center %": center_percentage,
+        "Freq band": f"{fmin}:{fmax}",
+        "Drop %": drop_percentage,
+        "Kept / Total": f"{kept_mask.sum()} / {len(kept_mask)}",
+    }
+    st.dataframe(
+        pd.DataFrame([
+            {**shared, "Classifier": "Logistic regression (5-fold)", "Accuracy": f"{acc_lr:.4f}", "Std": f"{std_lr:.4f}"},
+            {**shared, "Classifier": "MAD percentile atlas (LOO)",   "Accuracy": f"{acc_mad:.4f}", "Std": "—"},
+        ]),
+        width="stretch",
     )
-    st.dataframe(df_lr, width="stretch")
 
-    # --- Dropped thumbnails: side-by-side raw + processed ---
+    # --- Classify new image ---
+    atlas = build_atlas(vectors_f, labels_f)
+    with st.expander("Classify new image", expanded=False):
+        uploaded = st.file_uploader("Upload image", type=["jpg", "jpeg", "png", "bmp"])
+        if uploaded is not None:
+            file_bytes = np.frombuffer(uploaded.read(), np.uint8)
+            query_raw = cv2.imdecode(file_bytes, cv2.IMREAD_GRAYSCALE)
+            if query_raw is None:
+                st.error("Could not decode image.")
+            else:
+                fn_q = METHOD_FNS.get(method)
+                query_img = fn_q(query_raw) if fn_q is not None else query_raw
+                q = radial_profile_center_fraction(query_img, center_percentage)[fmin:fmax]
+
+                scores = score_spectrum(q, atlas)
+                ranks = rank_profiles(q, atlas)
+                pred_cls = max(scores, key=scores.__getitem__)
+
+                st.success(f"Predicted class: **{pred_cls}**")
+
+                fig_scores = go.Figure(go.Bar(
+                    x=list(scores.keys()),
+                    y=list(scores.values()),
+                    marker_color=[colors.get(c, "gray") for c in scores],
+                ))
+                fig_scores.update_layout(
+                    title="MAD-from-50 score per class (higher = better fit)",
+                    yaxis_title="Score",
+                    height=300,
+                )
+                st.plotly_chart(fig_scores, width="stretch")
+
+                fig_ranks = go.Figure()
+                fig_ranks.add_hline(y=50, line_dash="dash", line_color="gray",
+                                    annotation_text="median")
+                for cls in class_names:
+                    if cls not in ranks:
+                        continue
+                    fig_ranks.add_trace(go.Scatter(
+                        x=bin_axis,
+                        y=ranks[cls].tolist(),
+                        mode="lines",
+                        name=cls,
+                        line=dict(color=colors.get(cls, "gray")),
+                    ))
+                fig_ranks.update_layout(
+                    title="Per-bin percentile rank within each class (50 = perfect median fit)",
+                    xaxis_title="Radial bin",
+                    yaxis_title="Percentile rank",
+                    height=400,
+                )
+                st.plotly_chart(fig_ranks, width="stretch")
+
+    # --- Dropped thumbnails: raw (+ processed if not raw method) + FFT ---
     fn = METHOD_FNS.get(method)
+    is_raw_method = fn is None
     n_dropped_total = int((~kept_mask).sum())
     if n_dropped_total > 0:
         st.subheader(f"Dropped images ({n_dropped_total} total)")
@@ -643,34 +750,27 @@ def render_class_spectra_tab() -> None:
                     fname = filenames[idx]
                     img_path = image_dir / fname
                     dist_val = distances[idx]
-                    col_raw, col_proc = st.columns(2)
-                    with col_raw:
-                        if img_path.exists():
-                            st.image(
-                                str(img_path),
-                                caption=f"Raw  d={dist_val:.2f}",
-                                width=150,
-                            )
-                        else:
+                    cols = st.columns(2 if is_raw_method else 3)
+                    raw_img = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
+                    if raw_img is None:
+                        with cols[0]:
                             st.text(f"Missing: {fname}")
-                    with col_proc:
-                        if img_path.exists():
-                            raw_img = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
-                            if raw_img is not None and fn is not None:
-                                proc_img = fn(raw_img)
-                                st.image(
-                                    proc_img,
-                                    caption=f"Processed  d={dist_val:.2f}",
-                                    width=150,
-                                )
-                            elif raw_img is not None:
-                                st.image(
-                                    raw_img,
-                                    caption="(raw = processed for 'raw' method)",
-                                    width=150,
-                                )
-                        else:
-                            st.text("—")
+                        continue
+                    with cols[0]:
+                        st.image(raw_img, caption=f"Raw  d={dist_val:.2f}", width=280)
+                    if not is_raw_method:
+                        with cols[1]:
+                            st.image(fn(raw_img), caption=f"Processed  d={dist_val:.2f}", width=280)
+                    with cols[1 if is_raw_method else 2]:
+                        cropped = center_crop(raw_img, center_percentage)
+                        h, w = cropped.shape
+                        win = np.outer(np.hanning(h), np.hanning(w))
+                        mag = np.abs(np.fft.fftshift(
+                            np.fft.fft2(cropped.astype(np.float32) * win)
+                        ))
+                        log_mag = np.log1p(mag)
+                        fft_img = (log_mag / log_mag.max() * 255).astype(np.uint8)
+                        st.image(fft_img, caption="FFT magnitude (log)", width=280)
 
 
 def main():
