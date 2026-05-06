@@ -18,12 +18,6 @@ in
       description = "Local port for the streamlit service.";
     };
 
-    flakeUrl = lib.mkOption {
-      type = lib.types.str;
-      example = "git+ssh://git@github.com/your-org/reflection-removal?ref=main";
-      description = "The remote git flake URL to run.";
-    };
-
     dataDir = lib.mkOption {
       type = lib.types.str;
       description = "Path to the directory containing image data for the app.";
@@ -90,7 +84,7 @@ in
       };
 
       serviceConfig = {
-        ExecStart = "${pkgs.nix}/bin/nix run --refresh ${cfg.flakeUrl}#runStreamlitService";
+        ExecStart = "${pkgs.nix}/bin/nix run --refresh github:punsii/prml_ss26?ref=main#runStreamlitService";
         WorkingDirectory = cfg.dataDir;
         Restart = "always";
         RestartSec = "30s";
