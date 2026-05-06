@@ -1,73 +1,45 @@
 # Reflection Removal for Metal Surface Classification
 
-## Problem
+Strong specular reflections on metal workpieces interfere with a classifier that identifies four grinding states — *initial*, *grinding started*, *grinding decent*, *polished*. This repo evaluates reflection-removal / brightness-normalization techniques as a preprocessing step and explores frequency-domain features for the classifier itself.
 
-Strong light reflections on metal surfaces interfere with a classification model that identifies grinding states:
+## What's in here
 
-1. **Initial state** — unprocessed surface
-2. **Grinding started** — early grinding marks visible
-3. **Grinding decent** — significant material removal
-4. **Polished/finished** — final surface quality
+Preprocessing methods (`src/`):
 
-Reflections from workshop lighting create bright spots and specular highlights that obscure the actual surface texture, degrading classifier accuracy.
+- `clahe.py` — Contrast Limited Adaptive Histogram Equalization
+- `retinex.py` — Multi-Scale Retinex
+- `homomorphic.py` — Homomorphic filtering (log-frequency high-pass)
+- `specular_diffuse.py` — Dichromatic specular/diffuse separation
 
-## Goal
+Classifier experiments (`src/`):
 
-Evaluate and implement reflection removal / brightness normalization techniques as a preprocessing step to improve grinding state classification.
+- `radial.py`, `class_stats.py` — radial FFT spectrum features
+- `percentile_atlas.py` — per-class percentile-atlas classifier
 
-## Implemented Methods
+UI:
 
-All scripts live in `src/` and can be run standalone or via Nix apps on the BMW test image.
+- `app.py` — Streamlit app comparing methods side-by-side on the BMW dataset
 
-### CLAHE — `src/clahe.py`
+## Running
 
-Contrast Limited Adaptive Histogram Equalization. Divides image into tiles, equalizes histogram per tile with contrast limiting. Applied to L channel in LAB space.
-
-```
-nix run .#runClaheBmw
-python src/clahe.py <image> --clip-limit 2.0 --tile-size 8
-```
-
-### Multi-Scale Retinex — `src/retinex.py`
-
-Decomposes image into illumination × reflectance in log domain. Subtracts Gaussian-blurred illumination at multiple scales to normalize local brightness.
-
-- Ref: Jobson et al. (1997) "A Multiscale Retinex for Bridging the Gap Between Color Images and the Human Observation of Scenes." IEEE TIP 6(7).
+Nix-based; no `pip` / `conda` needed. From the repo root:
 
 ```
-nix run .#runRetinexBmw
-python src/retinex.py <image> --sigmas 15 80 250
+nix develop                 # dev shell with python + deps
+nix run .#runStreamlit      # launch the comparison UI
+nix run .#runClaheBmw       # one-shot demo on a BMW reference image
+nix run .#runRetinexBmw     # (also: runHomomorphicBmw, runSpecularBmw)
 ```
 
-### Homomorphic Filtering — `src/homomorphic.py`
+Each script in `src/` is also a standalone CLI — pass `--help` for options.
 
-High-pass filter in log-frequency domain. Attenuates slowly-varying illumination, preserves surface texture.
+## Deployment
 
-- Ref: Gonzalez & Woods (2008) "Digital Image Processing" Ch. 4.9.
+A NixOS module is exposed at `nixosModules.reflectionRemoval` that runs the streamlit app as a systemd service behind a Caddy reverse proxy. Hostname, ACME cert, data directory and flake URL are module options.
 
-```
-nix run .#runHomomorphicBmw
-python src/homomorphic.py <image> --gamma-low 0.3 --gamma-high 1.5 --cutoff 30
-```
+## See also
 
-### Specular/Diffuse Separation — `src/specular_diffuse.py`
-
-Chromaticity-based separation using the dichromatic reflection model. Best when material and illuminant colors differ.
-
-- Ref: Tan & Ikeuchi (2005) "Separating Reflection Components of Textured Surfaces using a Single Image." IEEE TPAMI 27(2).
-
-```
-nix run .#runSpecularBmw
-python src/specular_diffuse.py <image> --iterations 1 --kernel-size 15
-```
-
-## Future Options
-
-- **Highlight inpainting** — Mask saturated pixels, inpaint from surrounding texture.
-- **Deep Learning (GANs)** — GCNet-based removal from [reference repo](https://github.com/Devashi-Choudhary/Reflection-Removal-Techniques-Review). Needs pretrained weights.
-- **Convex Optimization** — Gradient thresholding + DCT (Yang et al. CVPR 2019). [MATLAB ref](https://github.com/alexch1/ImageProcessing).
-- **Relative Smoothness** — Single image layer separation. [MATLAB ref](https://github.com/yyhz76/reflectSuppress).
-
-## Dataset
-
-Custom dataset of metal surfaces under various lighting conditions — to be added.
+- [`docs/research_progress.md`](docs/research_progress.md) — running notes on experiments and ideas
+- [`docs/fft_spectrum_classifier.md`](docs/fft_spectrum_classifier.md) — percentile-atlas classifier design
+- [`docs/rbfnn_research.md`](docs/rbfnn_research.md) — RBF network classifier notes
+- [`docs/presentation_notes.md`](docs/presentation_notes.md) — slide outline and chronological notes

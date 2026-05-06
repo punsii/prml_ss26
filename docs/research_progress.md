@@ -64,7 +64,7 @@ From this point the radial spectrum is the project's central object. The four pr
   - **Scale matching is required first** — different camera resolutions map the same physical frequency to different bins. Nyquist normalisation (`bin / n_bins`) is the simplest fix.
   - Percentile and Mahalanobis converge under Gaussian distributions; percentiles win on heavy-tailed or multimodal bins.
 
-## Current state (uncommitted)
+## Current state
 
 - **`src/percentile_atlas.py`** — implements the design doc with **MAD-from-50** as the chosen first metric. Exposes `build_atlas`, `score_spectrum`, `rank_profiles`, `predict`, `mad_loo_cv` (leave-one-out CV).
 - **Class-spectra tab additions** in `app.py`:
