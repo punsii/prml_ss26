@@ -163,9 +163,10 @@ def render_homomorphic_detail(image: np.ndarray) -> None:
     )
 
 
-LABOR_DIR = Path("data/Datensatz_Labor")
-LABOR_CSV = Path("data/Labels_Datensatz_Labr.csv")
-BMW_DIR = Path("data/BMW_25/Rohdaten")
+DATA_DIR = Path(os.environ.get("IMAGE_DIR", "data"))
+LABOR_DIR = DATA_DIR / "Datensatz_Labor"
+LABOR_CSV = DATA_DIR / "Labels_Datensatz_Labr.csv"
+BMW_DIR = DATA_DIR / "BMW_25/Rohdaten"
 
 DATASETS = {
     "Datensatz Labor": {
