@@ -32,8 +32,7 @@ from class_stats import (CLASS_COLORS, compute_class_stats,
 from percentile_atlas import build_atlas, mad_loo_cv, rank_profiles, score_spectrum
 from homomorphic import homomorphic_filter
 from radial import (GRID_SIZE, RADIAL_DC_TRIM, TILE_INDICES, _radial_from_mag,
-                    center_crop, extract_patches, radial_profile,
-                    radial_profile_center_fraction)
+                    extract_patches, radial_profile)
 from retinex import multi_scale_retinex
 
 CENTER_IDX = (len(TILE_INDICES) ** 2) // 2  # row-major index of (4,4) tile
@@ -168,6 +167,10 @@ LABOR_DIR = DATA_DIR / "Datensatz_Labor"
 LABOR_CSV = DATA_DIR / "Labels_Datensatz_Labr.csv"
 BMW_DIR = DATA_DIR / "BMW_25/Rohdaten"
 
+# Frequency band used for class-spectra analysis (radial bins, exclusive max).
+FMIN = 2
+FMAX = 250
+
 DATASETS = {
     "Datensatz Labor": {
         "type": "csv",
@@ -211,28 +214,24 @@ def _cached_rows(dataset_name: str) -> list[tuple[str, str]] | None:
 
 
 @st.cache_data(show_spinner=False)
-def _cached_vectors(
-    dataset_name: str, method: str, center_percentage: float
-) -> dict | None:
-    """Cache-keyed on (dataset_name, method, center_percentage). Returns raw vector data."""
+def _cached_vectors(dataset_name: str, method: str) -> dict | None:
+    """Cache-keyed on (dataset_name, method). Returns raw vector data."""
     rows = _cached_rows(dataset_name)
     if rows is None:
         return None
     cfg = DATASETS[dataset_name]
     fn = METHOD_FNS.get(method)
     vectors, labels, filenames = compute_full_image_vectors(
-        rows, cfg["image_dir"], fn, center_percentage
+        rows, cfg["image_dir"], fn
     )
     if len(vectors) == 0:
         return None
     return {"vectors": vectors, "labels": labels, "filenames": filenames}
 
 
-def _load_vectors_with_progress(
-    dataset_name: str, method: str, center_percentage: float
-) -> dict | None:
+def _load_vectors_with_progress(dataset_name: str, method: str) -> dict | None:
     """Load vectors with a real progress bar on first run; instant on cache hit."""
-    cache_key = f"vectors_{dataset_name}_{method}_{center_percentage}"
+    cache_key = f"vectors_{dataset_name}_{method}"
     if cache_key in st.session_state:
         return st.session_state[cache_key]
 
@@ -258,7 +257,7 @@ def _load_vectors_with_progress(
             return None
         if fn is not None:
             img = fn(img)
-        return (fname, label, radial_profile_center_fraction(img, center_percentage))
+        return (fname, label, radial_profile(img))
 
     # Submit all tasks; collect results in completion order for progress, then
     # re-sort by original index to preserve row order for reproducibility.
@@ -308,9 +307,7 @@ def _load_vectors_with_progress(
     return result
 
 
-def _render_fft_explorer(
-    dataset_name: str, method: str, center_percentage: float
-) -> None:
+def _render_fft_explorer(dataset_name: str, method: str) -> None:
     """Show 2D FFT magnitude + radial profile for a single selected image."""
     cfg = DATASETS[dataset_name]
     image_dir = cfg["image_dir"]
@@ -356,10 +353,9 @@ def _render_fft_explorer(
     fn = METHOD_FNS.get(method)
     img = fn(raw_img) if fn is not None else raw_img
 
-    cropped = center_crop(img, center_percentage)
-    h, w = cropped.shape
+    h, w = img.shape
     win = np.outer(np.hanning(h), np.hanning(w))
-    mag = np.abs(np.fft.fftshift(np.fft.fft2(cropped.astype(np.float32) * win)))
+    mag = np.abs(np.fft.fftshift(np.fft.fft2(img.astype(np.float32) * win)))
 
     col_orig, col_a, col_b = st.columns(3)
     with col_orig:
@@ -408,40 +404,10 @@ def render_class_spectra_tab() -> None:
         index=0,
         help="Preprocessing applied to each image before computing radial spectrum. 'raw' = no preprocessing.",
     )
-    center_percentage = st.slider(
-        "Center percentage",
-        0.3,
-        1.0,
-        0.5,
-        0.05,
-        help="Fraction of image center (width and height) used for radial spectrum.",
-    )
 
     # --- 2D FFT explorer ---
     with st.expander("2D power spectrum explorer", expanded=False):
-        _render_fft_explorer(dataset_name, method, center_percentage)
-
-    # --- Frequency band sliders ---
-    st.markdown("**Frequency band for analysis**")
-    freq_col1, freq_col2 = st.columns(2)
-    with freq_col1:
-        freq_min = st.number_input(
-            "Freq min bin",
-            min_value=0,
-            max_value=500,
-            value=RADIAL_DC_TRIM,
-            step=1,
-            help="Lowest radial bin included. Use the FFT explorer to identify the grinding line band.",
-        )
-    with freq_col2:
-        freq_max = st.number_input(
-            "Freq max bin",
-            min_value=1,
-            max_value=2000,
-            value=200,
-            step=1,
-            help="Highest radial bin included (exclusive). Large value = include all.",
-        )
+        _render_fft_explorer(dataset_name, method)
 
     drop_percentage = st.slider(
         "Drop percentage",
@@ -449,14 +415,14 @@ def render_class_spectra_tab() -> None:
         1.0,
         0.1,
         0.01,
-        help="Fraction of each class to drop as Mahalanobis outliers.",
+        help="Fraction of each class to drop as Mahalanobis outliers. Applied after the cached vector computation.",
     )
 
     if not st.button("Compute"):
         st.info("Press 'Compute' to run the analysis.")
         return
 
-    cached = _load_vectors_with_progress(dataset_name, method, center_percentage)
+    cached = _load_vectors_with_progress(dataset_name, method)
 
     if cached is None:
         st.error("No images found or data unavailable.")
@@ -466,18 +432,13 @@ def render_class_spectra_tab() -> None:
     labels = cached["labels"]
     filenames = cached["filenames"]
 
-    # Band-limit
     actual_max = vectors.shape[1]
-    fmin = int(freq_min)
-    fmax = min(int(freq_max), actual_max)
-    if fmin >= fmax:
-        st.error(
-            f"freq_min ({fmin}) must be less than freq_max ({fmax}). Vector length: {actual_max}."
-        )
+    if FMAX > actual_max:
+        st.error(f"FMAX ({FMAX}) exceeds vector length ({actual_max}).")
         return
 
-    vectors_b = vectors[:, fmin:fmax]
-    bin_axis = list(range(fmin, fmax))
+    vectors_b = vectors[:, FMIN:FMAX]
+    bin_axis = list(range(FMIN, FMAX))
 
     with st.spinner("Filtering outliers…"):
         kept_mask, distances, dropped_per_class = mahalanobis_filter(
@@ -490,41 +451,56 @@ def render_class_spectra_tab() -> None:
     class_names = sorted(np.unique(labels).tolist())
     class_stats_data = compute_class_stats(vectors_f, labels_f)
 
-    # --- Plot 1: Per-class radial spectra ---
+    # --- Plot 1: Per-class 3D point cloud (stalagmites) ---
+    # For each class, histogram the (freq_bin, log10 magnitude) plane and emit
+    # one Scatter3d marker per non-empty cell at z = log(1 + count). Empty
+    # cells produce nothing, so each class's cloud is naturally clipped to its
+    # actual support. All classes share a single scene, one colour each.
+    n_mag_bins = 60
+    log_vecs = np.log10(np.maximum(vectors_f, 1e-6))
+    log_min = float(log_vecs.min())
+    log_max = float(log_vecs.max())
+    mag_edges = np.linspace(log_min, log_max, n_mag_bins + 1)
+    mag_centers = 0.5 * (mag_edges[:-1] + mag_edges[1:])
+
     fig_spec = go.Figure()
     for cls in class_names:
-        color = colors.get(cls, "gray")
-        if cls not in class_stats_data:
+        mask = labels_f == cls
+        if not mask.any():
             continue
-        m = class_stats_data[cls]["mean"]
-        s = class_stats_data[cls]["std"]
+        color = colors.get(cls, "gray")
+        cls_log = log_vecs[mask]
+        n_bins = cls_log.shape[1]
+        xs: list[int] = []
+        ys: list[float] = []
+        zs: list[float] = []
+        for b in range(n_bins):
+            counts, _ = np.histogram(cls_log[:, b], bins=mag_edges)
+            nonzero = np.nonzero(counts)[0]
+            if nonzero.size == 0:
+                continue
+            xs.extend([bin_axis[b]] * nonzero.size)
+            ys.extend(mag_centers[nonzero].tolist())
+            zs.extend(np.log1p(counts[nonzero]).tolist())
         fig_spec.add_trace(
-            go.Scatter(
-                x=bin_axis,
-                y=m.tolist(),
-                mode="lines",
+            go.Scatter3d(
+                x=xs,
+                y=ys,
+                z=zs,
+                mode="markers",
+                marker=dict(size=2, color=color, opacity=0.6),
                 name=cls,
-                line=dict(color=color),
             )
         )
-        fig_spec.add_trace(
-            go.Scatter(
-                x=bin_axis + bin_axis[::-1],
-                y=np.maximum(m + s, 1e-6).tolist() + np.maximum(m - s, 1e-6).tolist(),
-                fill="toself",
-                fillcolor=color,
-                opacity=0.15,
-                line=dict(width=0),
-                showlegend=False,
-                hoverinfo="skip",
-            )
-        )
-    fig_spec.update_yaxes(type="log")
+
     fig_spec.update_layout(
-        title=f"Per-class radial spectra — {dataset_name} — {method}  [bins {fmin}:{fmax}]",
-        xaxis_title="Radial bin",
-        yaxis_title="Mean FFT magnitude (log)",
-        height=400,
+        title=f"Per-class probability density — {dataset_name} — {method}  [bins {FMIN}:{FMAX}]",
+        scene=dict(
+            xaxis_title="Radial bin",
+            yaxis_title="log₁₀ magnitude",
+            zaxis_title="log(1 + count)",
+        ),
+        height=800,
     )
     st.plotly_chart(fig_spec, width="stretch")
 
@@ -561,7 +537,7 @@ def render_class_spectra_tab() -> None:
                 )
             )
         fig_wf.update_layout(
-            title=f"Waterfall spectra — {dataset_name} — {method}  [bins {fmin}:{fmax}]",
+            title=f"Waterfall spectra — {dataset_name} — {method}  [bins {FMIN}:{FMAX}]",
             scene=dict(
                 xaxis_title="Radial bin",
                 yaxis_title="Image index (normalised)",
@@ -615,7 +591,7 @@ def render_class_spectra_tab() -> None:
                 fig_atl.update_xaxes(title_text="Percentile", row=1, col=col_i)
             fig_atl.update_yaxes(title_text="Radial bin", row=1, col=1)
             fig_atl.update_layout(
-                title=f"Percentile atlas — {dataset_name} — {method}  [bins {fmin}:{fmax}]",
+                title=f"Percentile atlas — {dataset_name} — {method}  [bins {FMIN}:{FMAX}]",
                 height=500,
             )
             st.plotly_chart(fig_atl, width="stretch")
@@ -669,8 +645,7 @@ def render_class_spectra_tab() -> None:
     shared = {
         "Dataset": dataset_name,
         "Method": method,
-        "Center %": center_percentage,
-        "Freq band": f"{fmin}:{fmax}",
+        "Freq band": f"{FMIN}:{FMAX}",
         "Drop %": drop_percentage,
         "Kept / Total": f"{kept_mask.sum()} / {len(kept_mask)}",
     }
@@ -694,7 +669,7 @@ def render_class_spectra_tab() -> None:
             else:
                 fn_q = METHOD_FNS.get(method)
                 query_img = fn_q(query_raw) if fn_q is not None else query_raw
-                q = radial_profile_center_fraction(query_img, center_percentage)[fmin:fmax]
+                q = radial_profile(query_img)[FMIN:FMAX]
 
                 scores = score_spectrum(q, atlas)
                 ranks = rank_profiles(q, atlas)
@@ -763,11 +738,10 @@ def render_class_spectra_tab() -> None:
                         with cols[1]:
                             st.image(fn(raw_img), caption=f"Processed  d={dist_val:.2f}", width=280)
                     with cols[1 if is_raw_method else 2]:
-                        cropped = center_crop(raw_img, center_percentage)
-                        h, w = cropped.shape
+                        h, w = raw_img.shape
                         win = np.outer(np.hanning(h), np.hanning(w))
                         mag = np.abs(np.fft.fftshift(
-                            np.fft.fft2(cropped.astype(np.float32) * win)
+                            np.fft.fft2(raw_img.astype(np.float32) * win)
                         ))
                         log_mag = np.log1p(mag)
                         fft_img = (log_mag / log_mag.max() * 255).astype(np.uint8)

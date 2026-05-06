@@ -48,16 +48,6 @@ def radial_profile(image: np.ndarray) -> np.ndarray:
     return (summed / np.maximum(counts, 1))[: min(cy, cx)]
 
 
-def center_crop(image: np.ndarray, percentage: float = 0.5) -> np.ndarray:
-    """Return the central percentage×percentage rectangle of image."""
-    h, w = image.shape[:2]
-    ch = int(h * percentage)
-    cw = int(w * percentage)
-    r0 = (h - ch) // 2
-    c0 = (w - cw) // 2
-    return image[r0 : r0 + ch, c0 : c0 + cw]
-
-
 def _radial_from_mag(mag: np.ndarray) -> np.ndarray:
     """Mean magnitude per integer radius from an already-fftshifted 2D magnitude array."""
     h, w = mag.shape
@@ -69,12 +59,3 @@ def _radial_from_mag(mag: np.ndarray) -> np.ndarray:
     return (summed / np.maximum(counts, 1))[: min(cy, cx)]
 
 
-def radial_profile_center_fraction(
-    image: np.ndarray, center_percentage: float = 0.5
-) -> np.ndarray:
-    """Radial profile of the center-cropped image."""
-    cropped = center_crop(image, center_percentage)
-    h, w = cropped.shape
-    win = np.outer(np.hanning(h), np.hanning(w))
-    mag = np.abs(np.fft.fftshift(np.fft.fft2(cropped.astype(np.float32) * win)))
-    return _radial_from_mag(mag)

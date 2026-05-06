@@ -11,8 +11,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import StratifiedKFold, cross_val_score
 from sklearn.preprocessing import StandardScaler
 
-from radial import (RADIAL_DC_TRIM, extract_patches,
-                    radial_profile_center_fraction)
+from radial import RADIAL_DC_TRIM, extract_patches, radial_profile
 
 CLASS_COLORS = {
     "1-3um": "red",
@@ -73,7 +72,6 @@ def compute_full_image_vectors(
     rows: list[tuple[str, str]],
     data_dir: Path,
     method_fn,
-    center_percentage: float,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """Compute per-image radial profile vectors from full images.
 
@@ -81,7 +79,6 @@ def compute_full_image_vectors(
         rows: list of (filename, label) from load_labels.
         data_dir: directory containing the images.
         method_fn: callable applied to full grayscale image before profiling, or None.
-        center_percentage: fraction of image center to use for radial profile.
 
     Returns:
         (vectors_2d_array, labels_array, filenames_list) — all length N.
@@ -100,7 +97,7 @@ def compute_full_image_vectors(
             continue
         if method_fn is not None:
             img = method_fn(img)
-        profile = radial_profile_center_fraction(img, center_percentage)
+        profile = radial_profile(img)
         profiles.append(profile)
         labels.append(label)
         filenames.append(fname)
