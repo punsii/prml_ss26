@@ -10,13 +10,29 @@ Only Nix-based tooling is allowed in this repository. All dependencies, build st
 
 ## Verification
 
-The only command to verify the repo builds correctly is:
+For changes to Nix files (`flake.nix`, NixOS modules), use:
 
 ```bash
-nix flake check
+nix flake check --no-build
 ```
 
-Do not run other build/test commands directly.
+`--no-build` skips build steps that the agent sandbox cannot execute, but the
+evaluation pass still catches syntax errors, malformed module options, missing
+attrs, and bad references. Drop `--no-build` only when running outside the
+sandbox to also exercise the formatting check and the `test-specular-diffuse`
+derivation.
+
+There is **no fast verification command for Python code under `src/`** —
+`flake check` does not import the streamlit app or its modules, so Python
+syntax/import/runtime errors surface only when the app is actually launched.
+For non-trivial Python edits, inspect carefully and, if behaviour matters,
+run:
+
+```bash
+nix run .#runStreamlit
+```
+
+Do not introduce pip, conda, or other non-Nix package managers.
 
 ## Commits
 
