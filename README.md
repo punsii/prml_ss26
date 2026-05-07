@@ -39,6 +39,7 @@ A NixOS module is exposed at `nixosModules.reflectionRemoval` that runs the stre
 
 ## See also
 
+- [`docs/next_steps.md`](docs/next_steps.md) — current priorities and decided approach for upcoming work
 - [`docs/research_progress.md`](docs/research_progress.md) — running notes on experiments and ideas
 - [`docs/fft_spectrum_classifier.md`](docs/fft_spectrum_classifier.md) — percentile-atlas classifier design
 - [`docs/rbfnn_research.md`](docs/rbfnn_research.md) — RBF network classifier notes
