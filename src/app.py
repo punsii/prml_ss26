@@ -10,6 +10,7 @@ import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 
 # Ensure src/ is on sys.path when run from repo root
@@ -29,10 +30,11 @@ from clahe import apply_clahe
 from class_stats import (CLASS_COLORS, compute_class_stats,
                          compute_full_image_vectors, load_labels,
                          load_labels_from_dirs, logreg_cv, mahalanobis_filter)
-from percentile_atlas import build_atlas, mad_loo_cv, rank_profiles, score_spectrum
+from percentile_model import build_model, load_model, mad_loo_cv, save_model
 from homomorphic import homomorphic_filter
-from radial import (GRID_SIZE, RADIAL_DC_TRIM, TILE_INDICES, _radial_from_mag,
-                    extract_patches, radial_profile)
+from radial import (GRID_SIZE, MIN_IMAGE_SIZE, TILE_INDICES, WAVELENGTHS,
+                    _radial_from_mag, extract_patches,
+                    radial_profile_at_wavelengths)
 from retinex import multi_scale_retinex
 
 CENTER_IDX = (len(TILE_INDICES) ** 2) // 2  # row-major index of (4,4) tile
@@ -75,6 +77,9 @@ def draw_tile_outlines(image: np.ndarray) -> np.ndarray:
     out = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
     h, w = image.shape[:2]
     th, tw = h // GRID_SIZE, w // GRID_SIZE
+    # Thickness scales with image size so it reads consistently across datasets
+    # (e.g. 3648 px BMW images vs ~1k Labor images).
+    thickness = max(2, min(h, w) // 300)
     for i in TILE_INDICES:
         for j in TILE_INDICES:
             cv2.rectangle(
@@ -82,7 +87,7 @@ def draw_tile_outlines(image: np.ndarray) -> np.ndarray:
                 (j * tw, i * th),
                 ((j + 1) * tw, (i + 1) * th),
                 color=(0, 0, 255),
-                thickness=20,
+                thickness=thickness,
             )
     return cv2.cvtColor(out, cv2.COLOR_BGR2RGB)
 
@@ -100,15 +105,20 @@ def render_tile_grid(images: list[np.ndarray], label: str) -> None:
 
 
 def render_chart_grid(profiles: list[np.ndarray], label: str) -> None:
-    """3x3 grid of radial-spectrum line charts (~70% of container width, log y)."""
+    """3x3 grid of radial-spectrum line charts on the wavelength axis."""
     st.subheader(label)
     n = len(TILE_INDICES)
+    wl_idx = pd.Index(WAVELENGTHS, name="Wavelength (px)")
     for row in range(n):
         _, mid, _ = st.columns([1, 5, 1])
         with mid:
             cols = st.columns(n)
             for col in range(n):
-                cols[col].line_chart(np.log1p(profiles[row * n + col][RADIAL_DC_TRIM:]))
+                df = pd.DataFrame(
+                    {"log magnitude": np.log1p(profiles[row * n + col])},
+                    index=wl_idx,
+                )
+                cols[col].line_chart(df)
 
 
 def render_comparison(image: np.ndarray) -> None:
@@ -131,8 +141,12 @@ def render_comparison(image: np.ndarray) -> None:
         cols[0].image(original_center, caption="Original (center)", width="stretch")
         cols[1].image(results[CENTER_IDX], caption=f"{name} (center)", width="stretch")
         with cols[2]:
+            profile_wl = radial_profile_at_wavelengths(results[CENTER_IDX])
             st.line_chart(
-                np.log1p(radial_profile(results[CENTER_IDX])[RADIAL_DC_TRIM:])
+                pd.DataFrame(
+                    {"log magnitude": np.log1p(profile_wl)},
+                    index=pd.Index(WAVELENGTHS, name="Wavelength (px)"),
+                )
             )
             st.caption(f"Log radial spectrum ({name})")
         cols[3].metric(f"{name} — 9 tiles", f"{elapsed:.3f}s")
@@ -158,7 +172,8 @@ def render_homomorphic_detail(image: np.ndarray) -> None:
     render_tile_grid(patches, "Original")
     render_tile_grid(results, "Processed")
     render_chart_grid(
-        [radial_profile(r) for r in results], "Radial spectrum (processed)"
+        [radial_profile_at_wavelengths(r) for r in results],
+        "Radial spectrum (processed)",
     )
 
 
@@ -167,9 +182,6 @@ LABOR_DIR = DATA_DIR / "Datensatz_Labor"
 LABOR_CSV = DATA_DIR / "Labels_Datensatz_Labr.csv"
 BMW_DIR = DATA_DIR / "BMW_25/Rohdaten"
 
-# Frequency band used for class-spectra analysis (radial bins, exclusive max).
-FMIN = 2
-FMAX = 250
 
 DATASETS = {
     "Datensatz Labor": {
@@ -196,6 +208,52 @@ METHOD_FNS = {
     "retinex": multi_scale_retinex,
     "homomorphic": homomorphic_filter,
 }
+
+MODELS_DIR = Path("models")
+
+
+def _select_image(
+    key_prefix: str, dataset_name: str | None = None
+) -> tuple[str, str, Path] | None:
+    """Three-tier image selector: dataset → class → image filename.
+
+    If `dataset_name` is provided, the dataset selector is skipped (useful when
+    a dataset is already chosen elsewhere in the same tab). Returns the
+    selected (dataset_name, class_name, image_path) or None when no valid
+    selection can be made.
+    """
+    if dataset_name is None:
+        dataset_name = st.selectbox(
+            "Dataset",
+            list(DATASETS.keys()),
+            key=f"{key_prefix}_dataset",
+        )
+    cfg = DATASETS[dataset_name]
+    image_dir: Path = cfg["image_dir"]
+    if not image_dir.exists():
+        st.warning(f"Dataset directory not found: `{image_dir}`")
+        return None
+    if cfg["type"] == "csv":
+        if not cfg["csv_path"].exists():
+            st.warning(f"Labels CSV not found: `{cfg['csv_path']}`")
+            return None
+        rows = load_labels(cfg["csv_path"])
+    else:
+        rows = load_labels_from_dirs(image_dir)
+
+    class_map: dict[str, list[str]] = {}
+    for fname, label in rows:
+        if (image_dir / fname).exists():
+            class_map.setdefault(label, []).append(fname)
+    if not class_map:
+        st.warning("No labelled images found.")
+        return None
+
+    classes = sorted(class_map.keys())
+    cls_name = st.selectbox("Class", classes, key=f"{key_prefix}_class")
+    fnames = class_map[cls_name]
+    fname = st.selectbox("Image", fnames, key=f"{key_prefix}_image")
+    return dataset_name, cls_name, image_dir / fname
 
 
 @st.cache_data(show_spinner=False)
@@ -255,9 +313,11 @@ def _load_vectors_with_progress(dataset_name: str, method: str) -> dict | None:
         img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
         if img is None:
             return None
+        if min(img.shape[:2]) < MIN_IMAGE_SIZE:
+            return None
         if fn is not None:
             img = fn(img)
-        return (fname, label, radial_profile(img))
+        return (fname, label, radial_profile_at_wavelengths(img))
 
     # Submit all tasks; collect results in completion order for progress, then
     # re-sort by original index to preserve row order for reproducibility.
@@ -307,43 +367,71 @@ def _load_vectors_with_progress(dataset_name: str, method: str) -> dict | None:
     return result
 
 
+def _render_model_heatmap(
+    model: dict[str, np.ndarray],
+    wl_axis: list[float],
+    title: str,
+) -> None:
+    """Per-class percentile-model heatmap with equipotential contour lines.
+
+    Uses go.Contour with `coloring='heatmap'` so the gradient fill matches the
+    old heatmap look while contour lines make small inter-class differences
+    visible at a glance.
+    """
+    if not model:
+        st.info("Empty model — nothing to render.")
+        return
+    percentiles_axis = list(range(1, 101))
+    log_arrs = {cls: np.log10(np.maximum(arr, 1e-6)) for cls, arr in model.items()}
+    cls_list = sorted(log_arrs)
+    zmin = float(min(log_arrs[c].min() for c in cls_list))
+    zmax = float(max(log_arrs[c].max() for c in cls_list))
+    # Even contour spacing across classes so lines are directly comparable.
+    n_contours = 18
+    contour_step = (zmax - zmin) / n_contours if zmax > zmin else 1.0
+
+    fig = make_subplots(
+        rows=1,
+        cols=len(cls_list),
+        subplot_titles=cls_list,
+        shared_yaxes=True,
+    )
+    for col_i, cls in enumerate(cls_list, start=1):
+        fig.add_trace(
+            go.Contour(
+                z=log_arrs[cls].tolist(),
+                x=percentiles_axis,
+                y=wl_axis,
+                colorscale="Viridis",
+                zmin=zmin,
+                zmax=zmax,
+                contours=dict(
+                    coloring="heatmap",
+                    showlines=True,
+                    start=zmin,
+                    end=zmax,
+                    size=contour_step,
+                ),
+                line=dict(color="rgba(0,0,0,0.45)", width=0.6),
+                showscale=(col_i == len(cls_list)),
+                colorbar=dict(title="log₁₀ magnitude"),
+                hovertemplate="Percentile: %{x}<br>λ: %{y} px<br>log₁₀ mag: %{z:.2f}<extra></extra>",
+            ),
+            row=1,
+            col=col_i,
+        )
+        fig.update_xaxes(title_text="Percentile", row=1, col=col_i)
+    fig.update_yaxes(title_text="Wavelength (px)", row=1, col=1)
+    fig.update_layout(title=title, height=500)
+    st.plotly_chart(fig, width="stretch")
+
+
 def _render_fft_explorer(dataset_name: str, method: str) -> None:
     """Show 2D FFT magnitude + radial profile for a single selected image."""
-    cfg = DATASETS[dataset_name]
-    image_dir = cfg["image_dir"]
-    if not image_dir.exists():
-        st.warning("Dataset directory not found.")
+    selection = _select_image("fft_explorer", dataset_name=dataset_name)
+    if selection is None:
         return
-
-    if cfg["type"] == "csv":
-        rows = load_labels(cfg["csv_path"]) if cfg["csv_path"].exists() else []
-        img_paths = [
-            image_dir / fname for fname, _ in rows if (image_dir / fname).exists()
-        ]
-    else:
-        exts = {".jpg", ".jpeg", ".png", ".bmp"}
-        img_paths = sorted(
-            p
-            for subdir in sorted(image_dir.iterdir())
-            if subdir.is_dir()
-            for p in sorted(subdir.iterdir())
-            if p.suffix.lower() in exts
-        )
-
-    if not img_paths:
-        st.warning("No images found for FFT explorer.")
-        return
-
-    if cfg["type"] == "dirs":
-        labels_display = [f"[{p.parent.name}] {p.name}" for p in img_paths]
-    else:
-        labels_display = [str(p.relative_to(image_dir)) for p in img_paths]
-    sel_idx = st.selectbox(
-        "Image",
-        range(len(labels_display)),
-        format_func=lambda i: labels_display[i],
-    )
-    selected_path = img_paths[sel_idx]
+    _, _, selected_path = selection
 
     raw_img = cv2.imread(str(selected_path), cv2.IMREAD_GRAYSCALE)
     if raw_img is None:
@@ -365,15 +453,19 @@ def _render_fft_explorer(dataset_name: str, method: str) -> None:
         fft_gray = (log_mag / log_mag.max() * 255).astype(np.uint8)
         st.image(fft_gray, caption="2D FFT magnitude (log)", width="stretch")
     with col_b:
-        profile = _radial_from_mag(mag)
-        x_bins = list(range(len(profile)))
+        profile_wl = radial_profile_at_wavelengths(img)
         fig_rad = go.Figure(
-            go.Scatter(x=x_bins, y=profile.tolist(), mode="lines", name="magnitude")
+            go.Scatter(
+                x=WAVELENGTHS.tolist(),
+                y=profile_wl.tolist(),
+                mode="lines",
+                name="magnitude",
+            )
         )
         fig_rad.update_yaxes(type="log")
         fig_rad.update_layout(
             title="Radial profile (log y)",
-            xaxis_title="Radial bin",
+            xaxis_title="Wavelength (px)",
             yaxis_title="Magnitude",
             height=350,
             margin=dict(l=0, r=0, t=30, b=0),
@@ -418,7 +510,44 @@ def render_class_spectra_tab() -> None:
         help="Fraction of each class to drop as Mahalanobis outliers. Applied after the cached vector computation.",
     )
 
-    if not st.button("Compute"):
+    # --- Saved models (load path) ---
+    MODELS_DIR.mkdir(exist_ok=True)
+    saved_files = sorted(
+        MODELS_DIR.glob("*.csv"), key=lambda p: p.stat().st_mtime, reverse=True
+    )
+    with st.expander(f"Saved models ({len(saved_files)} in ./models/)", expanded=False):
+        if not saved_files:
+            st.caption(
+                "No saved models. Run Compute and use 'Save model' to write one."
+            )
+        else:
+            chosen = st.selectbox(
+                "Saved model",
+                saved_files,
+                format_func=lambda p: p.name,
+                key="saved_model_select",
+            )
+            if st.button("Load and show heatmap", key="load_model_btn"):
+                try:
+                    loaded_model, loaded_wl = load_model(chosen)
+                except Exception as exc:
+                    st.error(f"Failed to load: {exc}")
+                else:
+                    st.success(f"Loaded {chosen.name}")
+                    _render_model_heatmap(
+                        loaded_model,
+                        loaded_wl.tolist(),
+                        f"Percentile model — {chosen.stem}",
+                    )
+
+    # st.button returns True only on the rerun triggered by the click itself,
+    # which would unmount the Compute output the moment the user clicked any
+    # downstream widget (e.g. Save). Latch a flag in session_state instead so
+    # the output sticks and downstream widgets re-render on subsequent reruns.
+    if st.button("Compute"):
+        st.session_state["spectra_computed"] = True
+
+    if not st.session_state.get("spectra_computed"):
         st.info("Press 'Compute' to run the analysis.")
         return
 
@@ -432,30 +561,77 @@ def render_class_spectra_tab() -> None:
     labels = cached["labels"]
     filenames = cached["filenames"]
 
-    actual_max = vectors.shape[1]
-    if FMAX > actual_max:
-        st.error(f"FMAX ({FMAX}) exceeds vector length ({actual_max}).")
-        return
-
-    vectors_b = vectors[:, FMIN:FMAX]
-    bin_axis = list(range(FMIN, FMAX))
+    wl_axis = WAVELENGTHS.tolist()
 
     with st.spinner("Filtering outliers…"):
         kept_mask, distances, dropped_per_class = mahalanobis_filter(
-            vectors_b, labels, drop_percentage
+            vectors, labels, drop_percentage
         )
 
-    vectors_f = vectors_b[kept_mask]
+    vectors_f = vectors[kept_mask]
     labels_f = labels[kept_mask]
 
     class_names = sorted(np.unique(labels).tolist())
     class_stats_data = compute_class_stats(vectors_f, labels_f)
 
-    # --- Plot 1: Per-class 3D point cloud (stalagmites) ---
-    # For each class, histogram the (freq_bin, log10 magnitude) plane and emit
-    # one Scatter3d marker per non-empty cell at z = log(1 + count). Empty
-    # cells produce nothing, so each class's cloud is naturally clipped to its
-    # actual support. All classes share a single scene, one colour each.
+    # --- Build the model up-front so the Save button at the top has it ready ---
+    model = build_model(vectors_f, labels_f)
+
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    default_name = (
+        f"{dataset_name.replace(' ', '_')}__{method}__"
+        f"drop{drop_percentage:.2f}__{ts}.csv"
+    )
+    if st.button(f"Save model to ./models/{default_name}", key="save_model_btn"):
+        out_path = MODELS_DIR / default_name
+        save_model(model, WAVELENGTHS, out_path)
+        st.success(f"Saved to {out_path}")
+
+    # --- Frequency spectra (left) + per-class probability point cloud (right) ---
+    fig_freq = go.Figure()
+    for cls in class_names:
+        mask = labels_f == cls
+        if not mask.any():
+            continue
+        color = colors.get(cls, "gray")
+        cls_vecs = vectors_f[mask]
+        n_imgs = len(cls_vecs)
+        x_all: list = []
+        y_all: list = []
+        z_all: list = []
+        for i, row in enumerate(cls_vecs):
+            y_norm = i / max(n_imgs - 1, 1)
+            z_row = np.log10(np.maximum(row, 1e-6))
+            x_all.extend(wl_axis)
+            y_all.extend([y_norm] * len(wl_axis))
+            z_all.extend(z_row.tolist())
+            x_all.append(None)
+            y_all.append(None)
+            z_all.append(None)
+        fig_freq.add_trace(
+            go.Scatter3d(
+                x=x_all,
+                y=y_all,
+                z=z_all,
+                mode="lines",
+                line=dict(color=color, width=2),
+                name=cls,
+            )
+        )
+    fig_freq.update_layout(
+        title=f"Frequency spectra (per training image) — {method}",
+        scene=dict(
+            xaxis_title="Wavelength (px)",
+            yaxis_title="Image index (normalised)",
+            zaxis_title="log₁₀ FFT magnitude",
+        ),
+        height=700,
+        margin=dict(l=0, r=0, t=40, b=0),
+    )
+
+    # Histogram (freq_bin, log10 magnitude) per class; one Scatter3d marker per
+    # non-empty cell at z = log(1 + count). Empty cells produce nothing, so
+    # each cloud is naturally clipped to its own support.
     n_mag_bins = 60
     log_vecs = np.log10(np.maximum(vectors_f, 1e-6))
     log_min = float(log_vecs.min())
@@ -463,26 +639,26 @@ def render_class_spectra_tab() -> None:
     mag_edges = np.linspace(log_min, log_max, n_mag_bins + 1)
     mag_centers = 0.5 * (mag_edges[:-1] + mag_edges[1:])
 
-    fig_spec = go.Figure()
+    fig_cloud = go.Figure()
     for cls in class_names:
         mask = labels_f == cls
         if not mask.any():
             continue
         color = colors.get(cls, "gray")
         cls_log = log_vecs[mask]
-        n_bins = cls_log.shape[1]
-        xs: list[int] = []
+        n_wls = cls_log.shape[1]
+        xs: list[float] = []
         ys: list[float] = []
         zs: list[float] = []
-        for b in range(n_bins):
-            counts, _ = np.histogram(cls_log[:, b], bins=mag_edges)
+        for w in range(n_wls):
+            counts, _ = np.histogram(cls_log[:, w], bins=mag_edges)
             nonzero = np.nonzero(counts)[0]
             if nonzero.size == 0:
                 continue
-            xs.extend([bin_axis[b]] * nonzero.size)
+            xs.extend([wl_axis[w]] * nonzero.size)
             ys.extend(mag_centers[nonzero].tolist())
             zs.extend(np.log1p(counts[nonzero]).tolist())
-        fig_spec.add_trace(
+        fig_cloud.add_trace(
             go.Scatter3d(
                 x=xs,
                 y=ys,
@@ -492,109 +668,27 @@ def render_class_spectra_tab() -> None:
                 name=cls,
             )
         )
-
-    fig_spec.update_layout(
-        title=f"Per-class probability density — {dataset_name} — {method}  [bins {FMIN}:{FMAX}]",
+    fig_cloud.update_layout(
+        title=f"Per-class probability density — {method}",
         scene=dict(
-            xaxis_title="Radial bin",
+            xaxis_title="Wavelength (px)",
             yaxis_title="log₁₀ magnitude",
             zaxis_title="log(1 + count)",
         ),
-        height=800,
+        height=700,
+        margin=dict(l=0, r=0, t=40, b=0),
     )
-    st.plotly_chart(fig_spec, width="stretch")
 
-    # --- Plot 1b: Waterfall spectra ---
-    with st.expander("Waterfall spectra (per-image 3D)", expanded=False):
-        fig_wf = go.Figure()
-        for cls in class_names:
-            mask = labels_f == cls
-            if not mask.any():
-                continue
-            color = colors.get(cls, "gray")
-            cls_vecs = vectors_f[mask]
-            n_imgs = len(cls_vecs)
-            x_all: list = []
-            y_all: list = []
-            z_all: list = []
-            for i, row in enumerate(cls_vecs):
-                y_norm = i / max(n_imgs - 1, 1)
-                z_row = np.log10(np.maximum(row, 1e-6))
-                x_all.extend(bin_axis)
-                y_all.extend([y_norm] * len(bin_axis))
-                z_all.extend(z_row.tolist())
-                x_all.append(None)
-                y_all.append(None)
-                z_all.append(None)
-            fig_wf.add_trace(
-                go.Scatter3d(
-                    x=x_all,
-                    y=y_all,
-                    z=z_all,
-                    mode="lines",
-                    line=dict(color=color, width=2),
-                    name=cls,
-                )
-            )
-        fig_wf.update_layout(
-            title=f"Waterfall spectra — {dataset_name} — {method}  [bins {FMIN}:{FMAX}]",
-            scene=dict(
-                xaxis_title="Radial bin",
-                yaxis_title="Image index (normalised)",
-                zaxis_title="log₁₀ FFT magnitude",
-            ),
-            height=700,
-        )
-        st.plotly_chart(fig_wf, width="stretch")
+    col_freq, col_cloud = st.columns(2)
+    with col_freq:
+        st.plotly_chart(fig_freq, width="stretch")
+    with col_cloud:
+        st.plotly_chart(fig_cloud, width="stretch")
 
-    # --- Plot 1c: Percentile atlas ---
-    with st.expander("Percentile atlas (per-class)", expanded=False):
-        percentiles = np.arange(1, 101)
-        atlas: dict[str, np.ndarray] = {}
-        for cls in class_names:
-            mask = labels_f == cls
-            if not mask.any():
-                continue
-            cls_vecs = vectors_f[mask]
-            # percentile() returns (100, n_bins); transpose to (n_bins, 100)
-            atlas[cls] = np.log10(np.maximum(
-                np.percentile(cls_vecs, percentiles, axis=0), 1e-6
-            )).T
-
-        if atlas:
-            cls_list = [c for c in class_names if c in atlas]
-            zmin = float(min(v.min() for v in atlas.values()))
-            zmax = float(max(v.max() for v in atlas.values()))
-
-            fig_atl = make_subplots(
-                rows=1,
-                cols=len(cls_list),
-                subplot_titles=cls_list,
-                shared_yaxes=True,
-            )
-            for col_i, cls in enumerate(cls_list, start=1):
-                fig_atl.add_trace(
-                    go.Heatmap(
-                        z=atlas[cls].tolist(),
-                        x=percentiles.tolist(),
-                        y=bin_axis,
-                        colorscale="Viridis",
-                        zmin=zmin,
-                        zmax=zmax,
-                        showscale=(col_i == len(cls_list)),
-                        colorbar=dict(title="log₁₀ magnitude"),
-                        hovertemplate="Percentile: %{x}<br>Bin: %{y}<br>log₁₀ mag: %{z:.2f}<extra></extra>",
-                    ),
-                    row=1,
-                    col=col_i,
-                )
-                fig_atl.update_xaxes(title_text="Percentile", row=1, col=col_i)
-            fig_atl.update_yaxes(title_text="Radial bin", row=1, col=1)
-            fig_atl.update_layout(
-                title=f"Percentile atlas — {dataset_name} — {method}  [bins {FMIN}:{FMAX}]",
-                height=500,
-            )
-            st.plotly_chart(fig_atl, width="stretch")
+    # --- Percentile model heatmap with contour lines ---
+    _render_model_heatmap(
+        model, wl_axis, f"Percentile model — {dataset_name} — {method}"
+    )
 
     # --- Plot 2: PCA 3D scatter ---
     if vectors_f.shape[0] >= 3 and vectors_f.shape[1] >= 3:
@@ -640,75 +734,21 @@ def render_class_spectra_tab() -> None:
     st.subheader("Classification accuracy (filtered)")
     st.caption(
         "LR: multinomial logistic regression, 5-fold stratified CV.  "
-        "MAD: percentile atlas, leave-one-out CV, MAD-from-50 scoring."
+        "MAD: percentile model, leave-one-out CV, MAD-from-50 scoring."
     )
     shared = {
         "Dataset": dataset_name,
         "Method": method,
-        "Freq band": f"{FMIN}:{FMAX}",
         "Drop %": drop_percentage,
         "Kept / Total": f"{kept_mask.sum()} / {len(kept_mask)}",
     }
     st.dataframe(
         pd.DataFrame([
             {**shared, "Classifier": "Logistic regression (5-fold)", "Accuracy": f"{acc_lr:.4f}", "Std": f"{std_lr:.4f}"},
-            {**shared, "Classifier": "MAD percentile atlas (LOO)",   "Accuracy": f"{acc_mad:.4f}", "Std": "—"},
+            {**shared, "Classifier": "MAD percentile model (LOO)",   "Accuracy": f"{acc_mad:.4f}", "Std": "—"},
         ]),
         width="stretch",
     )
-
-    # --- Classify new image ---
-    atlas = build_atlas(vectors_f, labels_f)
-    with st.expander("Classify new image", expanded=False):
-        uploaded = st.file_uploader("Upload image", type=["jpg", "jpeg", "png", "bmp"])
-        if uploaded is not None:
-            file_bytes = np.frombuffer(uploaded.read(), np.uint8)
-            query_raw = cv2.imdecode(file_bytes, cv2.IMREAD_GRAYSCALE)
-            if query_raw is None:
-                st.error("Could not decode image.")
-            else:
-                fn_q = METHOD_FNS.get(method)
-                query_img = fn_q(query_raw) if fn_q is not None else query_raw
-                q = radial_profile(query_img)[FMIN:FMAX]
-
-                scores = score_spectrum(q, atlas)
-                ranks = rank_profiles(q, atlas)
-                pred_cls = max(scores, key=scores.__getitem__)
-
-                st.success(f"Predicted class: **{pred_cls}**")
-
-                fig_scores = go.Figure(go.Bar(
-                    x=list(scores.keys()),
-                    y=list(scores.values()),
-                    marker_color=[colors.get(c, "gray") for c in scores],
-                ))
-                fig_scores.update_layout(
-                    title="MAD-from-50 score per class (higher = better fit)",
-                    yaxis_title="Score",
-                    height=300,
-                )
-                st.plotly_chart(fig_scores, width="stretch")
-
-                fig_ranks = go.Figure()
-                fig_ranks.add_hline(y=50, line_dash="dash", line_color="gray",
-                                    annotation_text="median")
-                for cls in class_names:
-                    if cls not in ranks:
-                        continue
-                    fig_ranks.add_trace(go.Scatter(
-                        x=bin_axis,
-                        y=ranks[cls].tolist(),
-                        mode="lines",
-                        name=cls,
-                        line=dict(color=colors.get(cls, "gray")),
-                    ))
-                fig_ranks.update_layout(
-                    title="Per-bin percentile rank within each class (50 = perfect median fit)",
-                    xaxis_title="Radial bin",
-                    yaxis_title="Percentile rank",
-                    height=400,
-                )
-                st.plotly_chart(fig_ranks, width="stretch")
 
     # --- Dropped thumbnails: raw (+ processed if not raw method) + FFT ---
     fn = METHOD_FNS.get(method)
@@ -716,79 +756,67 @@ def render_class_spectra_tab() -> None:
     n_dropped_total = int((~kept_mask).sum())
     if n_dropped_total > 0:
         st.subheader(f"Dropped images ({n_dropped_total} total)")
+        thumb_w = 420
         for cls in class_names:
             dropped_indices = dropped_per_class.get(cls, [])
             if not dropped_indices:
                 continue
-            with st.expander(f"{cls} — {len(dropped_indices)} dropped"):
-                show_indices = dropped_indices[:12]
-                for idx in show_indices:
-                    fname = filenames[idx]
-                    img_path = image_dir / fname
-                    dist_val = distances[idx]
-                    cols = st.columns(2 if is_raw_method else 3)
-                    raw_img = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
-                    if raw_img is None:
-                        with cols[0]:
-                            st.text(f"Missing: {fname}")
-                        continue
+            st.markdown(f"**{cls}** — {len(dropped_indices)} dropped")
+            for idx in dropped_indices[:12]:
+                fname = filenames[idx]
+                img_path = image_dir / fname
+                dist_val = distances[idx]
+                cols = st.columns(2 if is_raw_method else 3)
+                raw_img = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
+                if raw_img is None:
                     with cols[0]:
-                        st.image(raw_img, caption=f"Raw  d={dist_val:.2f}", width=280)
-                    if not is_raw_method:
-                        with cols[1]:
-                            st.image(fn(raw_img), caption=f"Processed  d={dist_val:.2f}", width=280)
-                    with cols[1 if is_raw_method else 2]:
-                        h, w = raw_img.shape
-                        win = np.outer(np.hanning(h), np.hanning(w))
-                        mag = np.abs(np.fft.fftshift(
-                            np.fft.fft2(raw_img.astype(np.float32) * win)
-                        ))
-                        log_mag = np.log1p(mag)
-                        fft_img = (log_mag / log_mag.max() * 255).astype(np.uint8)
-                        st.image(fft_img, caption="FFT magnitude (log)", width=280)
+                        st.text(f"Missing: {fname}")
+                    continue
+                with cols[0]:
+                    st.image(raw_img, caption=f"Raw  d={dist_val:.2f}", width=thumb_w)
+                if not is_raw_method:
+                    with cols[1]:
+                        st.image(
+                            fn(raw_img),
+                            caption=f"Processed  d={dist_val:.2f}",
+                            width=thumb_w,
+                        )
+                with cols[1 if is_raw_method else 2]:
+                    h, w = raw_img.shape
+                    win = np.outer(np.hanning(h), np.hanning(w))
+                    mag = np.abs(np.fft.fftshift(
+                        np.fft.fft2(raw_img.astype(np.float32) * win)
+                    ))
+                    log_mag = np.log1p(mag)
+                    fft_img = (log_mag / log_mag.max() * 255).astype(np.uint8)
+                    st.image(fft_img, caption="FFT magnitude (log)", width=thumb_w)
 
 
 def main():
     st.set_page_config(layout="wide", page_title="Reflection Removal Comparison")
     st.title("Brightness Normalization Comparison (patch mode, grayscale)")
 
-    if not BMW_DIR.exists():
-        st.error(f"Image directory not found: `{BMW_DIR}`")
-        st.info("Run this app from the repo root directory.")
-        return
-
-    exts = {".jpg", ".jpeg", ".png", ".bmp"}
-    img_entries = [
-        (f"[{subdir.name}] {p.name}", p)
-        for subdir in sorted(BMW_DIR.iterdir())
-        if subdir.is_dir()
-        for p in sorted(subdir.iterdir())
-        if p.suffix.lower() in exts
-    ]
-    if not img_entries:
-        st.error("No images found.")
-        return
-
-    display_names = [label for label, _ in img_entries]
-    img_paths_map = {label: path for label, path in img_entries}
-
     tab_cmp, tab_homo, tab_cls = st.tabs(
         ["Method comparison", "Homomorphic detail", "Class spectra"]
     )
     with tab_cmp:
-        selected = st.selectbox("Select image", display_names, index=0, key="img_cmp")
-        image = cv2.imread(str(img_paths_map[selected]), cv2.IMREAD_GRAYSCALE)
-        if image is not None:
-            render_comparison(image)
-        else:
-            st.error(f"Cannot read: {selected}")
+        selection = _select_image("img_cmp")
+        if selection is not None:
+            _, _, path = selection
+            image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+            if image is not None:
+                render_comparison(image)
+            else:
+                st.error(f"Cannot read: {path}")
     with tab_homo:
-        selected = st.selectbox("Select image", display_names, index=0, key="img_homo")
-        image = cv2.imread(str(img_paths_map[selected]), cv2.IMREAD_GRAYSCALE)
-        if image is not None:
-            render_homomorphic_detail(image)
-        else:
-            st.error(f"Cannot read: {selected}")
+        selection = _select_image("img_homo")
+        if selection is not None:
+            _, _, path = selection
+            image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+            if image is not None:
+                render_homomorphic_detail(image)
+            else:
+                st.error(f"Cannot read: {path}")
     with tab_cls:
         render_class_spectra_tab()
 
