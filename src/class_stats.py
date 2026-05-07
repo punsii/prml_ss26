@@ -11,7 +11,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import StratifiedKFold, cross_val_score
 from sklearn.preprocessing import StandardScaler
 
-from radial import RADIAL_DC_TRIM, extract_patches, radial_profile
+from radial import MIN_IMAGE_SIZE, radial_profile_at_wavelengths
 
 CLASS_COLORS = {
     "1-3um": "red",
@@ -73,7 +73,10 @@ def compute_full_image_vectors(
     data_dir: Path,
     method_fn,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
-    """Compute per-image radial profile vectors from full images.
+    """Compute per-image radial profile vectors on a fixed wavelength axis.
+
+    Images smaller than MIN_IMAGE_SIZE are skipped (the wavelength axis up
+    to 200 px requires at least a 200 px patch).
 
     Args:
         rows: list of (filename, label) from load_labels.
@@ -81,8 +84,8 @@ def compute_full_image_vectors(
         method_fn: callable applied to full grayscale image before profiling, or None.
 
     Returns:
-        (vectors_2d_array, labels_array, filenames_list) — all length N.
-        vectors_2d_array has shape (N, min_profile_len).
+        (vectors_2d_array, labels_array, filenames_list).
+        vectors_2d_array has shape (N, len(WAVELENGTHS)).
     """
     profiles: list[np.ndarray] = []
     labels: list[str] = []
@@ -95,19 +98,18 @@ def compute_full_image_vectors(
         img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
         if img is None:
             continue
+        if min(img.shape[:2]) < MIN_IMAGE_SIZE:
+            continue
         if method_fn is not None:
             img = method_fn(img)
-        profile = radial_profile(img)
-        profiles.append(profile)
+        profiles.append(radial_profile_at_wavelengths(img))
         labels.append(label)
         filenames.append(fname)
 
     if not profiles:
         return np.empty((0, 0)), np.empty(0, dtype=str), []
 
-    min_len = min(len(p) for p in profiles)
-    vectors = np.array([p[:min_len] for p in profiles])
-    return vectors, np.array(labels), filenames
+    return np.array(profiles), np.array(labels), filenames
 
 
 def compute_class_stats(vectors: np.ndarray, labels: np.ndarray) -> dict:
