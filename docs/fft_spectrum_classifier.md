@@ -2,19 +2,19 @@
 
 ## Concept
 
-For each class and each radial frequency bin, compute the full empirical distribution of FFT magnitudes across all training images. This gives a `(n_classes, n_bins, 100)` tensor of percentile values. When a new image arrives, its spectrum is compared against each class's percentile profile to produce a class score.
+For each class and each radial frequency bin, compute the full empirical distribution of FFT magnitudes across all training images. This gives a `(n_classes, n_bins, 100)` tensor of percentile values — the **model** (analogous to "weights" in a deep-learning workflow). When a new image arrives, its spectrum is compared against each class's percentile profile to produce a class score.
 
-## Building the Percentile Atlas
+## Building the Percentile Model
 
 1. For each class `c`, collect the `(N_c, n_bins)` matrix of training spectra (after Mahalanobis outlier removal, same as current pipeline).
 2. For each bin `b`, compute `np.percentile(spectra[:, b], np.arange(1, 101))` → 100 values.
-3. Result: `atlas[c][b][p]` = the magnitude that `p%` of class `c` images fall below at bin `b`.
+3. Result: `model[c][b][p]` = the magnitude that `p%` of class `c` images fall below at bin `b`.
 
 ## Scoring a New Spectrum
 
 Given a query spectrum `q` (shape `(n_bins,)`), for each class `c`:
 
-1. For each bin `b`, find the percentile rank `r_b` of `q[b]` within `atlas[c][b]` — i.e., how many of the 100 percentile thresholds `q[b]` exceeds. `r_b ∈ [0, 100]`.
+1. For each bin `b`, find the percentile rank `r_b` of `q[b]` within `model[c][b]` — i.e., how many of the 100 percentile thresholds `q[b]` exceeds. `r_b ∈ [0, 100]`.
 2. This produces a rank vector `R_c` (shape `(n_bins,)`) of percentile positions within class `c`.
 3. A spectrum that "fits" class `c` well will have ranks clustered near 50 (median); outliers will push ranks toward 0 or 100.
 
@@ -42,27 +42,27 @@ The simplest first step is Nyquist normalisation; it requires no metadata and is
 
 ## Implementation Plan
 
-1. **`src/percentile_atlas.py`** — new module
-   - `build_atlas(vectors, labels) -> dict[str, np.ndarray]`  
+1. **`src/percentile_model.py`** — new module
+   - `build_model(vectors, labels) -> dict[str, np.ndarray]`  
      Returns `{class: (n_bins, 100)}` percentile arrays.
-   - `score_spectrum(q, atlas) -> dict[str, float]`  
+   - `score_spectrum(q, model) -> dict[str, float]`  
      Returns per-class score using MAD-from-50 (start simple, swap in later).
-   - `predict(q, atlas) -> str`  
+   - `predict(q, model) -> str`  
      Returns argmax class.
 
 2. **`src/app.py`** — add to class-spectra tab
-   - New expander: "Percentile atlas" — heatmap of `atlas[c]` (bins × percentiles) for each class, using Plotly `go.Heatmap`. This directly visualises the distribution shape at every frequency.
+   - New expander: "Percentile model" — heatmap of `model[c]` (bins × percentiles) for each class, using Plotly `go.Heatmap`. This directly visualises the distribution shape at every frequency.
    - New expander: "Classify new image" — upload an image, compute its spectrum, display rank profile and per-class scores.
 
 3. **Evaluation** — replace or complement `logreg_cv`:
-   - Leave-one-out or k-fold: for each held-out image, build atlas from remaining images, score against all classes, check if argmax is correct.
+   - Leave-one-out or k-fold: for each held-out image, build model from remaining images, score against all classes, check if argmax is correct.
    - Compare accuracy to current logistic regression baseline.
 
 ## Open Questions
 
-- **Band limiting**: should the percentile atlas respect the `[fmin, fmax]` band slider, or use the full spectrum? Probably yes — the band limits are physically motivated.
+- **Band limiting**: should the percentile model respect the `[fmin, fmax]` band slider, or use the full spectrum? Probably yes — the band limits are physically motivated.
 - **Weighting bins**: high-frequency bins have more variance and less class-discriminative signal. A frequency-weighted score (weight by between-class variance / within-class variance, i.e., a 1D Fisher criterion per bin) could sharpen the classifier.
-- **Atlas size**: `n_classes × n_bins × 100` floats. For 4 classes, 200 bins, float32: 320 KB. Negligible.
+- **Model size**: `n_classes × n_bins × 100` floats. For 4 classes, 200 bins, float32: 320 KB. Negligible.
 
 ---
 
@@ -72,9 +72,9 @@ The simplest first step is Nyquist normalisation; it requires no metadata and is
 
 Since only bins 1–250 carry discriminative signal, the crop used to build each fingerprint can be made much smaller than the full image. A crop of side length `s` produces radial bins up to `s/2`; to reach bin 250 we only need `s ≥ 500 px`. Smaller crops mean:
 
-a) **More training samples** — a single full image can yield multiple non-overlapping crops, multiplying the atlas training set with no additional labelled images.
+a) **More training samples** — a single full image can yield multiple non-overlapping crops, multiplying the model training set with no additional labelled images.
 
-b) **Per-pixel classification** — a crop of the minimum required size can be centered on any pixel. Each pixel gets its own fingerprint by running the Hann-windowed FFT on the crop centered there, then scoring against the atlas. This is the natural extension of the current "center crop of the full image" approach to a spatially dense version.
+b) **Per-pixel classification** — a crop of the minimum required size can be centered on any pixel. Each pixel gets its own fingerprint by running the Hann-windowed FFT on the crop centered there, then scoring against the model. This is the natural extension of the current "center crop of the full image" approach to a spatially dense version.
 
 ### Classification map via grid sampling + interpolation
 
@@ -86,18 +86,18 @@ Apply a per-class colour tint (e.g. the existing `CLASS_COLORS` palette) to the 
 
 ### Outlier / "hole" class
 
-A 5th atlas class for outliers (holes in the part, strong specular reflections, sensor artifacts). Two ways to populate it:
+A 5th model class for outliers (holes in the part, strong specular reflections, sensor artifacts). Two ways to populate it:
 
-- **Manual labelling** — crop regions visually identified as outliers and add them to the atlas.
+- **Manual labelling** — crop regions visually identified as outliers and add them to the model.
 - **Spectral outlier mining** — images already flagged by the Mahalanobis filter have atypical spectra within their nominal class; collect these as a candidate outlier set and inspect them. From what has been observed, the dominant outlier types are holes in the part under inspection and unusually shaped specular reflections.
 
-The MAD scorer naturally handles a 5-class atlas with no code changes — the outlier class simply competes for the argmax.
+The MAD scorer naturally handles a 5-class model with no code changes — the outlier class simply competes for the argmax.
 
 ### GPU shader implementation
 
-For production-speed classification maps, implement the per-pixel FFT + atlas scoring as a GPU compute or fragment shader:
+For production-speed classification maps, implement the per-pixel FFT + model scoring as a GPU compute or fragment shader:
 
-- **Input textures**: the grayscale image + the atlas as a `(n_classes, n_bins, 100)` 3D texture.
-- **Per-fragment work**: for each output pixel, sample the image in a `s × s` neighbourhood, apply a Hann window (precomputed as a 1D texture → outer product in the shader), compute the 2D FFT (e.g. via a two-pass row/column FFT using shared memory in a compute shader), accumulate radial bins, score against the atlas, emit the winning class or a blended colour.
+- **Input textures**: the grayscale image + the model as a `(n_classes, n_bins, 100)` 3D texture.
+- **Per-fragment work**: for each output pixel, sample the image in a `s × s` neighbourhood, apply a Hann window (precomputed as a 1D texture → outer product in the shader), compute the 2D FFT (e.g. via a two-pass row/column FFT using shared memory in a compute shader), accumulate radial bins, score against the model, emit the winning class or a blended colour.
 - **Framework options**: GLSL compute shaders (OpenGL/Vulkan), WGSL (WebGPU, browser-deployable), or CUDA/ROCm for offline batch processing. WebGPU is attractive for a browser-based Streamlit alternative.
 - **FFT in a shader**: a radix-2 Cooley–Tukey FFT over `s = 512` takes ~9 passes of butterfly operations on the GPU; well within real-time budget per tile. Alternatively, accumulate the radial profile directly in the spatial domain using the Wiener–Khinchin theorem (autocorrelation → power spectrum), which maps cleanly to a convolution pass.

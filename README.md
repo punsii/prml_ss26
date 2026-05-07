@@ -14,7 +14,7 @@ Preprocessing methods (`src/`):
 Classifier experiments (`src/`):
 
 - `radial.py`, `class_stats.py` — radial FFT spectrum features
-- `percentile_atlas.py` — per-class percentile-atlas classifier
+- `percentile_model.py` — per-class percentile-model classifier ("model" = atlas of per-wavelength percentiles, the analogue of weights in deep-learning)
 
 UI:
 
@@ -41,6 +41,6 @@ A NixOS module is exposed at `nixosModules.reflectionRemoval` that runs the stre
 
 - [`docs/next_steps.md`](docs/next_steps.md) — current priorities and decided approach for upcoming work
 - [`docs/research_progress.md`](docs/research_progress.md) — running notes on experiments and ideas
-- [`docs/fft_spectrum_classifier.md`](docs/fft_spectrum_classifier.md) — percentile-atlas classifier design
+- [`docs/fft_spectrum_classifier.md`](docs/fft_spectrum_classifier.md) — percentile-model classifier design
 - [`docs/rbfnn_research.md`](docs/rbfnn_research.md) — RBF network classifier notes
 - [`docs/presentation_notes.md`](docs/presentation_notes.md) — slide outline and chronological notes
